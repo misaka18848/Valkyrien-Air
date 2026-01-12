@@ -1,0 +1,26 @@
+{
+  "required": true,
+  "package": "org.valkyrienskies.valkyrienair.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "minVersion": "0.8",
+  "client": [
+    "client.MixinCamera",
+    "client.MixinMinecraft",
+    "client.renderer.MixinLevelRenderer",
+    "feature.ship_water_pockets.MixinClientPacketListener"
+  ],
+  "mixins": [
+    "compat.vs2.MixinBuoyancyHandlerAttachment",
+    "compat.vs2.MixinVSGameUtilsKt",
+    "feature.ship_water_pockets.MixinEntity",
+    "feature.ship_water_pockets.MixinLevel",
+    "feature.ship_water_pockets.MixinLevelReader",
+    "server.MixinMinecraftServer",
+    "world.level.block.MixinBaseFireBlock",
+    "world.level.block.MixinFarmBlock"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "refmap": "valkyrien-air-common-refmap.json"
+}

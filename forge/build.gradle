@@ -1,0 +1,129 @@
+import net.fabricmc.loom.task.RemapJarTask
+
+buildscript {
+    repositories { mavenCentral() }
+    dependencies {
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22'
+        classpath 'org.jetbrains.kotlin:kotlin-serialization:1.9.22'
+    }
+}
+
+plugins {
+    id "com.github.johnrengelman.shadow" version "7.1.2"
+    id "com.matthewprenger.cursegradle"
+    id "com.modrinth.minotaur"
+}
+
+architectury {
+    platformSetupLoomIde()
+    forge()
+}
+
+configurations {
+    common
+    shadowCommon
+    compileClasspath.extendsFrom common
+    runtimeClasspath.extendsFrom common
+    developmentForge.extendsFrom common
+}
+
+repositories {
+    maven { name = 'Forge Maven'; url = 'https://maven.minecraftforge.net/' }
+}
+
+dependencies {
+    forge("net.minecraftforge:forge:${minecraft_version}-${forge_version}")
+
+    common(project(path: ":common", configuration: "namedElements")) { transitive = false }
+    shadowCommon(project(path: ":common", configuration: "transformProductionForge")) { transitive = false }
+
+    include(modApi("dev.architectury:architectury-forge:${rootProject.architectury_api_version}"))
+
+    implementation(annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1"))
+    implementation(include("io.github.llamalad7:mixinextras-forge:0.4.1"))
+
+    // VS2 + VSCore
+    modApi("org.valkyrienskies:valkyrienskies-120-forge:${rootProject.vs2_version}") { transitive = false
+        exclude group: 'org.valkyrienskies.core', module: ''
+        exclude group: "com.simibubi"
+        exclude group: "io.github.fabricators_of_create"
+        exclude group: "dev.engine-room"
+        exclude group: "dev.engine_room"
+    }
+    implementation("org.valkyrienskies.core:api:${rootProject.vscore_version}") { transitive = false
+        exclude group: 'org.joml', module: ''
+    }
+    implementation("org.valkyrienskies.core:util:${rootProject.vscore_version}") { transitive = false
+        exclude group: 'org.joml', module: ''
+    }
+    implementation("org.valkyrienskies.core:internal:${rootProject.vscore_version}") { transitive = false
+        exclude group: 'org.joml', module: ''
+    }
+
+    // Kotlin for Forge
+    implementation("thedarkcolour:kotlinforforge:${rootProject.kotlin_forge}")
+
+    compileOnly("org.joml:joml:1.10.4")
+    compileOnly("org.joml:joml-primitives:1.10.0")
+}
+
+processResources {
+    filesMatching("META-INF/mods.toml") { expand "version": version }
+}
+
+loom {
+    accessWidenerPath = project(":common").file("src/main/resources/valkyrienair.accesswidener")
+
+    forge {
+        mixinConfig "valkyrienair-common.mixins.json"
+        mixinConfig "valkyrienair.mixins.json"
+
+        convertAccessWideners.set(false) // <- CLAVE
+        // no pongas extraAccessWideners
+    }
+
+    mixin { defaultRefmapName = "valkyrienair-refmap.json" }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 17
+}
+
+shadowJar {
+    exclude "fabric.mod.json"
+    exclude "architectury.common.json"
+
+    configurations = [project.configurations.shadowCommon]
+    archiveClassifier.set("dev-shadow")
+
+    // Ensure this module’s own output/resources are included
+    from(sourceSets.main.output)
+}
+
+// DO NOT rely on :forge:remapJar (it was producing empty jars / AW issues).
+tasks.named("remapJar", RemapJarTask).configure {
+    dependsOn(tasks.named("shadowJar"))
+    inputFile.set(tasks.named("shadowJar").get().archiveFile)
+}
+
+jar { archiveClassifier.set("dev") }
+
+sourcesJar {
+    def commonSources = project(":common").sourcesJar
+    dependsOn commonSources
+    from commonSources.archiveFile.map { zipTree(it) }
+}
+
+components.java {
+    withVariantsFromConfiguration(project.configurations.shadowRuntimeElements) { skip() }
+}
+
+publishing {
+    publications {
+        mavenForge(MavenPublication) {
+            artifactId = rootProject.archives_base_name + "-" + project.name
+            from components.java
+        }
+    }
+    repositories { }
+}

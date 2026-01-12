@@ -1,0 +1,169 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
+plugins {
+    id 'dev.architectury.loom' version '1.3.355' apply false
+    id 'architectury-plugin' version '3.4.146'
+    id "org.jetbrains.kotlin.jvm" version "$kotlin_version" apply false
+
+    id 'com.matthewprenger.cursegradle' version '1.4.0' apply false
+    id "com.modrinth.minotaur" version "2.4.5" apply false
+}
+
+// Version determinance in line with VS conventions
+if (project.hasProperty("CustomReleaseVersion")) {
+    // Remove release/ from the version if present
+    version = project.property("CustomReleaseVersion").replaceFirst("^release/", "")
+} else {
+    String gitRevision = "git rev-parse HEAD".execute().text.trim()
+    if (gitRevision.isEmpty()) {
+        gitRevision = 'unknown'
+    }
+
+    version = mod_version + '+' + (gitRevision.length() >= 10 ? gitRevision.substring(0, 10) : gitRevision)
+}
+
+architectury {
+    minecraft = project.minecraft_version
+}
+
+allprojects {
+    apply plugin: "java"
+    apply plugin: "kotlin"
+    apply plugin: "architectury-plugin"
+    apply plugin: "maven-publish"
+
+    archivesBaseName = rootProject.archives_base_name
+    version = rootProject.version
+    group = rootProject.maven_group
+
+    // Copied from VS oddities. Forces arch to use the right version (which it doesn't for some reason on some machines)
+    configurations.configureEach {
+        resolutionStrategy.force "org.lwjgl:lwjgl-stb:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl-opengl:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl-openal:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl-tinyfd:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl-jemalloc:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl-glfw:3.3.1"
+        resolutionStrategy.force "org.lwjgl:lwjgl:3.3.1"
+    }
+
+    repositories {
+        //Add any repositories to fetch dependencies from here.
+        //Most dependencies are mirrored to the VS Maven, so by default only it is included alongside mavenLocal and KFF.
+        mavenLocal()
+        maven {
+            name = "MinecraftForge"
+            url = "https://maven.minecraftforge.net/"
+        }
+        maven {
+            name = "Fabric"
+            url = "https://maven.fabricmc.net/"
+        }
+        maven {
+            name = "Architectury"
+            url = "https://maven.architectury.dev/"
+        }
+        maven {
+            name = "Sponge"
+            url = "https://repo.spongepowered.org/repository/maven-public/"
+        }
+        maven {
+            name = "Valkyrien Skies Internal"
+            url = project.vs_maven_url ?: 'https://maven.valkyrienskies.org'
+            if (project.vs_maven_username && project.vs_maven_password) {
+                credentials {
+                    username = project.vs_maven_username
+                    password = project.vs_maven_password
+                }
+            }
+        }
+        maven {
+            name = 'Kotlin for Forge'
+            url = 'https://thedarkcolour.github.io/KotlinForForge/'
+            content { includeGroup "thedarkcolour" }
+        }
+    }
+
+    java {
+        withSourcesJar()
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = "UTF-8"
+
+        options.release = 17
+    }
+
+    tasks.withType(KotlinJvmCompile).configureEach {
+        kotlinOptions {
+            jvmTarget = "17"
+            freeCompilerArgs += "-Xjvm-default=all"
+
+        }
+    }
+
+    String buildNumber = System.getenv("GITHUB_RUN_NUMBER")
+}
+
+subprojects {
+    apply plugin: 'dev.architectury.loom'
+    apply plugin: "org.jetbrains.kotlin.jvm"
+
+    // Workaround for Gradle task action ordering:
+    // Loom's remap tasks execute their `run()` action and then the inherited `AbstractCopyTask.copy()`,
+    // which overwrites the remapped output jar with a manifest-only jar (resulting in ~261 byte artifacts).
+    tasks.configureEach { task ->
+        if (task.name == "remapJar" || task.name == "remapSourcesJar" || task.name.startsWith("transformProduction")) {
+            def actionsToRemove = task.actions.findAll { action ->
+                try {
+                    def methodField = action.class.getDeclaredField("method")
+                    methodField.accessible = true
+                    def method = methodField.get(action)
+                    return method != null &&
+                            method.declaringClass?.name == "org.gradle.api.tasks.AbstractCopyTask" &&
+                            method.name == "copy"
+                } catch (Throwable ignored) {
+                    return false
+                }
+            }
+            actionsToRemove.each { task.actions.remove(it) }
+        }
+    }
+
+    repositories {
+        //Add repositories here if necessary.
+    }
+
+    loom {
+        silentMojangMappingsLicense()
+    }
+
+    dependencies {
+        minecraft "net.minecraft:minecraft:$rootProject.minecraft_version"
+        mappings loom.officialMojangMappings()
+    }
+
+
+}
+
+// Root project has no runnable mod jar; publish the platform jars instead to avoid confusing ~261 byte artifacts.
+tasks.named("jar").configure { enabled = false }
+tasks.named("sourcesJar").configure { enabled = false }
+
+tasks.register("copyFabricJar", Copy) {
+    dependsOn(":fabric:remapJar")
+    from(project(":fabric").tasks.named("remapJar").flatMap { it.archiveFile })
+    into(layout.buildDirectory.dir("libs"))
+    rename { String fileName -> fileName.replace(".jar", "-fabric.jar") }
+}
+
+tasks.register("copyForgeJar", Copy) {
+    dependsOn(":forge:remapJar")
+    from(project(":forge").tasks.named("remapJar").flatMap { it.archiveFile })
+    into(layout.buildDirectory.dir("libs"))
+    rename { String fileName -> fileName.replace(".jar", "-forge.jar") }
+}
+
+tasks.named("build").configure {
+    dependsOn("copyFabricJar", "copyForgeJar")
+}

@@ -1,0 +1,42 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+#issueTrackerURL = ""
+license = "CC0-1.0"
+
+[[mods]]
+modId = "valkyrienair"
+version = "${version}"
+displayName = "Valkyrien Air"
+authors = "gigab"
+description = '''
+Ship air/water pockets for Valkyrien Skies 2 (submarines).
+'''
+logoFile = "icon.png"
+
+[[dependencies.valkyrienair]]
+modId = "forge"
+mandatory = true
+versionRange = "[47,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.valkyrienair]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.valkyrienair]]
+modId = "architectury"
+mandatory = true
+versionRange = "[9.1.12,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.valkyrienair]]
+modId = "valkyrienskies"
+mandatory = true
+versionRange = "[2.4.7,)"
+ordering = "AFTER"
+side = "BOTH"

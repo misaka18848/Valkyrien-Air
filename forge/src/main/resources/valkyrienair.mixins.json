@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "org.valkyrienskies.valkyrienair.forge.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "feature.ship_water_pockets.MixinEntityFluidPushing"
+  ],
+  "client": [
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "minVersion": "0.8"
+}

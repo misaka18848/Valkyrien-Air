@@ -1,0 +1,60 @@
+architectury {
+    // keep common enabled for the platforms defined in gradle.properties (e.g. "fabric,forge")
+    common rootProject.enabled_platforms.split(',')
+}
+
+loom {
+    // Access Widener must live in common resources
+    accessWidenerPath = file("src/main/resources/valkyrienair.accesswidener")
+}
+
+test {
+    useJUnitPlatform()
+}
+
+sourceSets {
+    test.kotlin.srcDirs += "src/test/kotlin"
+}
+
+dependencies {
+    // Fabric Loader ONLY for @Environment annotations in common (do not use other loader classes)
+    modImplementation "net.fabricmc:fabric-loader:${rootProject.fabric_loader_version}"
+
+    // MixinExtras common (shared)
+    implementation("io.github.llamalad7:mixinextras-common:0.4.1")
+    annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1")
+
+    // Architectury common (optional but usually used)
+    modImplementation "dev.architectury:architectury:${rootProject.architectury_api_version}"
+
+    // VS2 common + VSCore
+    modApi("org.valkyrienskies:valkyrienskies-120-common:${rootProject.vs2_version}") {
+        exclude group: "com.simibubi"
+        exclude group: "io.github.fabricators_of_create"
+        exclude group: "dev.engine-room"
+        exclude group: "dev.engine_room"
+    }
+
+    implementation("org.valkyrienskies.core:api:${rootProject.vscore_version}") {
+        exclude group: "org.joml", module: ""
+    }
+    implementation("org.valkyrienskies.core:impl:${rootProject.vscore_version}") {
+        exclude group: "org.joml", module: ""
+    }
+    implementation("org.valkyrienskies.core:internal:${rootProject.vscore_version}") {
+        exclude group: "org.joml", module: ""
+    }
+
+    // Math
+    implementation("org.joml:joml:1.10.4")
+    implementation("org.joml:joml-primitives:1.10.0")
+
+    // Unit testing
+    def kotestVersion = "5.4.1"
+    testImplementation "org.junit.jupiter:junit-jupiter-api:5.8.1"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:5.8.1"
+    testImplementation "io.kotest:kotest-runner-junit5:${kotestVersion}"
+    testImplementation "io.kotest:kotest-property:${kotestVersion}"
+    testImplementation "io.kotest:kotest-assertions-core:${kotestVersion}"
+    testImplementation "io.mockk:mockk:1.12.5"
+}

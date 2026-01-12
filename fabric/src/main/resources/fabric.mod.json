@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "valkyrienair",
+  "version": "${version}",
+  "name": "Valkyrien Air",
+  "description": "Ship air/water pockets for Valkyrien Skies 2 (submarines).",
+  "authors": [
+    "gigab"
+  ],
+  "contact": {
+    "sources": "https://github.com/ValkyrienSkies"
+  },
+  "license": "CC0-1.0",
+  "icon": "assets/valkyrienair/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "org.valkyrienskies.valkyrienair.fabric.ValkyrienAirModFabric"
+    ],
+    "client": [
+      "org.valkyrienskies.valkyrienair.fabric.client.ValkyrienAirModFabricClient"
+    ]
+  },
+  "mixins": [
+    "valkyrienair-common.mixins.json",
+    "valkyrienair.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.17.2",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "architectury": ">=9.1.12",
+    "fabric-api": "*",
+    "valkyrienskies": ">=2.4.7"
+  },
+  "suggests": {
+    "another-mod": "*"
+  }
+}
