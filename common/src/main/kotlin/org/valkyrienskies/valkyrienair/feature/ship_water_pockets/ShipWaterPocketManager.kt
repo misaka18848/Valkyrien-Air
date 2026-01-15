@@ -56,6 +56,7 @@ object ShipWaterPocketManager {
         var flooded: BitSet = BitSet(),
         var materializedWater: BitSet = BitSet(),
         var waterReachable: BitSet = BitSet(),
+        var geometryRevision: Long = 0,
         var dirty: Boolean = true,
         var lastFloodUpdateTick: Long = Long.MIN_VALUE,
         var lastWaterReachableUpdateTick: Long = Long.MIN_VALUE,
@@ -199,6 +200,7 @@ object ShipWaterPocketManager {
     }
 
     data class ClientWaterReachableSnapshot(
+        val geometryRevision: Long,
         val minX: Int,
         val minY: Int,
         val minZ: Int,
@@ -214,6 +216,7 @@ object ShipWaterPocketManager {
         if (!level.isClientSide) return null
         val state = clientStates[level.dimensionId]?.get(shipId) ?: return null
         return ClientWaterReachableSnapshot(
+            state.geometryRevision,
             state.minX,
             state.minY,
             state.minZ,
@@ -619,6 +622,11 @@ object ShipWaterPocketManager {
         sizeY: Int,
         sizeZ: Int,
     ) {
+        val boundsChanged =
+            state.minX != minX || state.minY != minY || state.minZ != minZ ||
+                state.sizeX != sizeX || state.sizeY != sizeY || state.sizeZ != sizeZ
+        val prevOpen = state.open
+
         state.minX = minX
         state.minY = minY
         state.minZ = minZ
@@ -674,6 +682,9 @@ object ShipWaterPocketManager {
         }
 
         state.dirty = false
+        if (boundsChanged || prevOpen != open) {
+            state.geometryRevision++
+        }
     }
 
     private fun computeWaterReachable(

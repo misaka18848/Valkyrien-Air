@@ -29,6 +29,7 @@ import org.valkyrienskies.core.api.ships.properties.ShipTransform;
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.valkyrienair.config.ValkyrienAirConfig;
 import org.valkyrienskies.valkyrienair.feature.ship_water_pockets.ShipWaterPocketManager;
+import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCull;
 
 public final class ShipWaterPocketWorldWaterMaskRenderer {
 
@@ -158,6 +159,7 @@ public final class ShipWaterPocketWorldWaterMaskRenderer {
         if (level == null || camera == null) return;
 
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return;
+        if (ShipWaterPocketExternalWaterCull.isShaderCullingActive()) return;
 
         if (lastLevel != level) {
             clear();
