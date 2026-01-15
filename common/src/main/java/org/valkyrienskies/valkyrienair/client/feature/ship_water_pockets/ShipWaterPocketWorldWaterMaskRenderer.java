@@ -41,6 +41,11 @@ public final class ShipWaterPocketWorldWaterMaskRenderer {
     private static final double DEPTH_BIAS_MAX_FRACTION_OF_DISTANCE = 0.5;
     private static final int SURFACE_UPDATE_INTERVAL_TICKS = 20;
 
+    // OpenGL clip-space near plane is NDC Z = -1. When the camera gets extremely close to the mask, our depth bias can
+    // push the polygon past the near plane, which makes it get clipped away and lets water leak through (most noticeable
+    // on Sodium/Embeddium, where this depth-mask method is used as a fallback).
+    private static final float NDC_Z_NEAR_CLAMP = -1.0f + 1.0e-4f;
+
     private static final int[][] EDGES = {
         {0, 1}, {1, 2}, {2, 3}, {3, 0},
         {4, 5}, {5, 6}, {6, 7}, {7, 4},
@@ -630,7 +635,8 @@ public final class ShipWaterPocketWorldWaterMaskRenderer {
 
         // Keep NDC X/Y identical by only changing clip-space Z (keep X/Y/W untouched).
         final float ndcZScaled = clipScaledZ / clipScaledW;
-        final float biasedClipZ = ndcZScaled * clipW;
+        final float clampedNdcZ = Math.max(ndcZScaled, NDC_Z_NEAR_CLAMP);
+        final float biasedClipZ = clampedNdcZ * clipW;
 
         // Back-transform from clip -> view -> local coordinates.
         final float viewX = temps.invProjM00 * clipX + temps.invProjM10 * clipY + temps.invProjM20 * biasedClipZ + temps.invProjM30 * clipW;

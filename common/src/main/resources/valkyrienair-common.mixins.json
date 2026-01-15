@@ -7,6 +7,7 @@
     "client.MixinCamera",
     "client.MixinMinecraft",
     "client.renderer.MixinLevelRenderer",
+    "client.renderer.MixinShaderInstance",
     "feature.ship_water_pockets.MixinClientPacketListener"
   ],
   "mixins": [

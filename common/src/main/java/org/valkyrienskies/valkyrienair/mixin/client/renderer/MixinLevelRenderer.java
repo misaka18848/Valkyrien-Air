@@ -2,7 +2,6 @@ package org.valkyrienskies.valkyrienair.mixin.client.renderer;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
-import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.Camera;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -19,9 +18,11 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCullRenderContext;
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketWorldWaterMaskRenderer;
-import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCull;
 
+// Embeddium/Sodium can overwrite LevelRenderer's chunk-layer rendering, which makes INVOKE-based injections into that
+// method fragile. We track the active world translucent pass here and drive shader uniform updates from ShaderInstance#apply.
 @Mixin(value = LevelRenderer.class, priority = 900)
 public abstract class MixinLevelRenderer {
 
@@ -66,33 +67,26 @@ public abstract class MixinLevelRenderer {
 
     @Inject(
         method = "renderChunkLayer(Lnet/minecraft/client/renderer/RenderType;Lcom/mojang/blaze3d/vertex/PoseStack;DDDLorg/joml/Matrix4f;)V",
-        at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/RenderType;setupRenderState()V",
-            shift = At.Shift.AFTER
-        ),
+        at = @At("HEAD"),
         require = 0
     )
-    private void valkyrienair$setupExternalWorldWaterCullingShaderAfterRenderState(final RenderType renderType,
+    private void valkyrienair$beginWorldTranslucentChunkLayer(final RenderType renderType,
         final PoseStack poseStack, final double camX, final double camY, final double camZ, final Matrix4f projectionMatrix,
         final CallbackInfo ci) {
         if (this.level == null) return;
         if (renderType != RenderType.translucent()) return;
-
-        ShipWaterPocketExternalWaterCull.setupForWorldTranslucentPass(RenderSystem.getShader(), this.level, camX, camY, camZ);
+        ShipWaterPocketExternalWaterCullRenderContext.beginWorldTranslucentChunkLayer(this.level, camX, camY, camZ);
     }
 
     @Inject(
         method = "renderChunkLayer(Lnet/minecraft/client/renderer/RenderType;Lcom/mojang/blaze3d/vertex/PoseStack;DDDLorg/joml/Matrix4f;)V",
-        at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/RenderType;clearRenderState()V",
-            shift = At.Shift.BEFORE
-        ),
+        at = @At("TAIL"),
         require = 0
     )
-    private void valkyrienair$disableExternalWorldWaterCullingShaderBeforeClearRenderState(final RenderType renderType,
+    private void valkyrienair$endWorldTranslucentChunkLayer(final RenderType renderType,
         final PoseStack poseStack, final double camX, final double camY, final double camZ, final Matrix4f projectionMatrix,
         final CallbackInfo ci) {
         if (renderType != RenderType.translucent()) return;
-        ShipWaterPocketExternalWaterCull.disable(RenderSystem.getShader());
+        ShipWaterPocketExternalWaterCullRenderContext.endWorldTranslucentChunkLayer();
     }
 }
