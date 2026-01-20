@@ -36,6 +36,7 @@ public abstract class MixinShaderInstance {
                     ShipWaterPocketExternalWaterCullRenderContext.getCamX(),
                     ShipWaterPocketExternalWaterCullRenderContext.getCamY(),
                     ShipWaterPocketExternalWaterCullRenderContext.getCamZ());
+                ShipWaterPocketExternalWaterCull.setShipPass(shader, ShipWaterPocketExternalWaterCullRenderContext.isInShipRender());
                 return;
             }
         }
@@ -44,4 +45,3 @@ public abstract class MixinShaderInstance {
         ShipWaterPocketExternalWaterCull.disable(shader);
     }
 }
-

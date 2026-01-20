@@ -27,6 +27,8 @@ architectury {
 }
 
 allprojects {
+    ext.loom_fabric_repository = "https://maven2.fabricmc.net/"
+
     apply plugin: "java"
     apply plugin: "kotlin"
     apply plugin: "architectury-plugin"
@@ -57,7 +59,7 @@ allprojects {
         }
         maven {
             name = "Fabric"
-            url = "https://maven.fabricmc.net/"
+            url = "https://maven2.fabricmc.net/"
         }
         maven {
             name = "Architectury"
@@ -136,6 +138,7 @@ subprojects {
 
     loom {
         silentMojangMappingsLicense()
+        intermediaryUrl.set('https://maven2.fabricmc.net/net/fabricmc/intermediary/%1$s/intermediary-%1$s-v2.jar')
     }
 
     dependencies {

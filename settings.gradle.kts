@@ -2,7 +2,7 @@ pluginManagement {
     repositories {
         mavenCentral()
         gradlePluginPortal()
-        maven("https://maven.fabricmc.net/") {
+        maven("https://maven2.fabricmc.net/") {
             name = "Fabric"
         }
         maven("https://repo.spongepowered.org/repository/maven-public/") {

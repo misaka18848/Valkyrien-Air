@@ -28,6 +28,7 @@ uniform vec4 ValkyrienAir_WaterOverlayUv;
 
 uniform vec4 ValkyrienAir_ShipAabbMin0;
 uniform vec4 ValkyrienAir_ShipAabbMax0;
+uniform vec3 ValkyrienAir_CameraShipPos0;
 uniform vec4 ValkyrienAir_GridMin0;
 uniform vec4 ValkyrienAir_GridSize0;
 uniform mat4 ValkyrienAir_WorldToShip0;
@@ -36,6 +37,7 @@ uniform usampler2D ValkyrienAir_OccMask0;
 
 uniform vec4 ValkyrienAir_ShipAabbMin1;
 uniform vec4 ValkyrienAir_ShipAabbMax1;
+uniform vec3 ValkyrienAir_CameraShipPos1;
 uniform vec4 ValkyrienAir_GridMin1;
 uniform vec4 ValkyrienAir_GridSize1;
 uniform mat4 ValkyrienAir_WorldToShip1;
@@ -44,6 +46,7 @@ uniform usampler2D ValkyrienAir_OccMask1;
 
 uniform vec4 ValkyrienAir_ShipAabbMin2;
 uniform vec4 ValkyrienAir_ShipAabbMax2;
+uniform vec3 ValkyrienAir_CameraShipPos2;
 uniform vec4 ValkyrienAir_GridMin2;
 uniform vec4 ValkyrienAir_GridSize2;
 uniform mat4 ValkyrienAir_WorldToShip2;
@@ -52,6 +55,7 @@ uniform usampler2D ValkyrienAir_OccMask2;
 
 uniform vec4 ValkyrienAir_ShipAabbMin3;
 uniform vec4 ValkyrienAir_ShipAabbMax3;
+uniform vec3 ValkyrienAir_CameraShipPos3;
 uniform vec4 ValkyrienAir_GridMin3;
 uniform vec4 ValkyrienAir_GridSize3;
 uniform mat4 ValkyrienAir_WorldToShip3;
@@ -99,7 +103,7 @@ bool va_shouldDiscardForShip0(vec3 worldPos) {
     if (worldPos.y < ValkyrienAir_ShipAabbMin0.y || worldPos.y > ValkyrienAir_ShipAabbMax0.y) return false;
     if (worldPos.z < ValkyrienAir_ShipAabbMin0.z || worldPos.z > ValkyrienAir_ShipAabbMax0.z) return false;
 
-    vec3 shipPos = (ValkyrienAir_WorldToShip0 * vec4(worldPos, 1.0)).xyz;
+    vec3 shipPos = (ValkyrienAir_WorldToShip0 * vec4(valkyrienair_CamRelPos, 0.0)).xyz + ValkyrienAir_CameraShipPos0;
     vec3 localPos = shipPos - ValkyrienAir_GridMin0.xyz;
     vec3 size = ValkyrienAir_GridSize0.xyz;
     if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
@@ -124,7 +128,7 @@ bool va_shouldDiscardForShip1(vec3 worldPos) {
     if (worldPos.y < ValkyrienAir_ShipAabbMin1.y || worldPos.y > ValkyrienAir_ShipAabbMax1.y) return false;
     if (worldPos.z < ValkyrienAir_ShipAabbMin1.z || worldPos.z > ValkyrienAir_ShipAabbMax1.z) return false;
 
-    vec3 shipPos = (ValkyrienAir_WorldToShip1 * vec4(worldPos, 1.0)).xyz;
+    vec3 shipPos = (ValkyrienAir_WorldToShip1 * vec4(valkyrienair_CamRelPos, 0.0)).xyz + ValkyrienAir_CameraShipPos1;
     vec3 localPos = shipPos - ValkyrienAir_GridMin1.xyz;
     vec3 size = ValkyrienAir_GridSize1.xyz;
     if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
@@ -149,7 +153,7 @@ bool va_shouldDiscardForShip2(vec3 worldPos) {
     if (worldPos.y < ValkyrienAir_ShipAabbMin2.y || worldPos.y > ValkyrienAir_ShipAabbMax2.y) return false;
     if (worldPos.z < ValkyrienAir_ShipAabbMin2.z || worldPos.z > ValkyrienAir_ShipAabbMax2.z) return false;
 
-    vec3 shipPos = (ValkyrienAir_WorldToShip2 * vec4(worldPos, 1.0)).xyz;
+    vec3 shipPos = (ValkyrienAir_WorldToShip2 * vec4(valkyrienair_CamRelPos, 0.0)).xyz + ValkyrienAir_CameraShipPos2;
     vec3 localPos = shipPos - ValkyrienAir_GridMin2.xyz;
     vec3 size = ValkyrienAir_GridSize2.xyz;
     if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
@@ -174,7 +178,7 @@ bool va_shouldDiscardForShip3(vec3 worldPos) {
     if (worldPos.y < ValkyrienAir_ShipAabbMin3.y || worldPos.y > ValkyrienAir_ShipAabbMax3.y) return false;
     if (worldPos.z < ValkyrienAir_ShipAabbMin3.z || worldPos.z > ValkyrienAir_ShipAabbMax3.z) return false;
 
-    vec3 shipPos = (ValkyrienAir_WorldToShip3 * vec4(worldPos, 1.0)).xyz;
+    vec3 shipPos = (ValkyrienAir_WorldToShip3 * vec4(valkyrienair_CamRelPos, 0.0)).xyz + ValkyrienAir_CameraShipPos3;
     vec3 localPos = shipPos - ValkyrienAir_GridMin3.xyz;
     vec3 size = ValkyrienAir_GridSize3.xyz;
     if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
