@@ -409,7 +409,6 @@ public final class ShipWaterPocketExternalWaterCull {
 
             ok &= handles.shipAabbMinLoc[i] >= 0;
             ok &= handles.shipAabbMaxLoc[i] >= 0;
-            ok &= handles.cameraShipPosLoc[i] >= 0;
             ok &= handles.gridMinLoc[i] >= 0;
             ok &= handles.gridSizeLoc[i] >= 0;
             ok &= handles.worldToShipLoc[i] >= 0;
