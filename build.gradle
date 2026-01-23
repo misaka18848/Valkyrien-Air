@@ -53,6 +53,7 @@ allprojects {
         //Add any repositories to fetch dependencies from here.
         //Most dependencies are mirrored to the VS Maven, so by default only it is included alongside mavenLocal and KFF.
         mavenLocal()
+        mavenCentral()
         maven {
             name = "MinecraftForge"
             url = "https://maven.minecraftforge.net/"
@@ -72,6 +73,10 @@ allprojects {
         maven {
             name = "Valkyrien Skies Internal"
             url = project.vs_maven_url ?: 'https://maven.valkyrienskies.org'
+            // Avoid resolution failures/timeouts for artifacts that are not actually hosted on the VS Maven.
+            content {
+                excludeGroup "net.jodah"
+            }
             if (project.vs_maven_username && project.vs_maven_password) {
                 credentials {
                     username = project.vs_maven_username
