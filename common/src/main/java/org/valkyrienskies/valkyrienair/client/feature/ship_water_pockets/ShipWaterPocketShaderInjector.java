@@ -24,19 +24,10 @@ public final class ShipWaterPocketShaderInjector {
     private static final boolean DEBUG_LOG = Boolean.getBoolean("valkyrienair.debugShipWaterCull");
     private static final boolean DUMP_PATCHED_SHADERS = Boolean.getBoolean("valkyrienair.dumpShipWaterCullShaders");
     private static final boolean DEBUG_DISABLE_WATER_UV_FILTER = Boolean.getBoolean("valkyrienair.debugDisableWaterUvFilter");
-    private static final boolean DEBUG_TINT_CULL_TEST = Boolean.getBoolean("valkyrienair.debugTintCullTest");
-    private static final boolean DEBUG_CULL_STAGE = Boolean.getBoolean("valkyrienair.debugCullStage");
-    private static final boolean DEBUG_IGNORE_OCC_MASK = Boolean.getBoolean("valkyrienair.debugIgnoreOccMask");
 
     static {
         if (DEBUG_DISABLE_WATER_UV_FILTER) {
             LOGGER.info("VA: debugDisableWaterUvFilter enabled — culling applies to all fragments (no water UV gating)");
-        }
-        if (DEBUG_CULL_STAGE) {
-            LOGGER.info("VA: debugCullStage enabled — culling is replaced by per-fragment stage visualization");
-        }
-        if (DEBUG_IGNORE_OCC_MASK) {
-            LOGGER.info("VA: debugIgnoreOccMask enabled — occ mask is ignored (culling uses air mask only)");
         }
     }
 
@@ -90,11 +81,10 @@ public final class ShipWaterPocketShaderInjector {
     private static final Pattern EMBEDDIUM_MAIN_SIGNATURE =
         Pattern.compile("(?s)\\bvoid\\s+main\\s*\\(\\s*\\)\\s*\\{");
 
-    private static final String EMBEDDIUM_FRAGMENT_DECLS = """
+	    private static final String EMBEDDIUM_FRAGMENT_DECLS = """
 
         // %s
         // %s
-        const bool VA_DEBUG_IGNORE_OCC_MASK = %s;
         uniform float ValkyrienAir_CullEnabled;
         uniform float ValkyrienAir_IsShipPass;
         uniform vec3 ValkyrienAir_CameraWorldPos;
@@ -103,41 +93,33 @@ public final class ShipWaterPocketShaderInjector {
         uniform vec4 ValkyrienAir_WaterFlowUv;
         uniform vec4 ValkyrienAir_WaterOverlayUv;
 
-        uniform vec4 ValkyrienAir_ShipAabbMin0;
-        uniform vec4 ValkyrienAir_ShipAabbMax0;
-        uniform vec3 ValkyrienAir_CameraShipPos0;
-        uniform vec4 ValkyrienAir_GridMin0;
-        uniform vec4 ValkyrienAir_GridSize0;
-        uniform mat4 ValkyrienAir_WorldToShip0;
-        uniform usampler2D ValkyrienAir_AirMask0;
-        uniform usampler2D ValkyrienAir_OccMask0;
+	        uniform vec4 ValkyrienAir_ShipAabbMin0;
+	        uniform vec4 ValkyrienAir_ShipAabbMax0;
+	        uniform vec4 ValkyrienAir_GridSize0;
+	        uniform mat4 ValkyrienAir_WorldToShip0;
+	        uniform usampler2D ValkyrienAir_AirMask0;
+	        uniform usampler2D ValkyrienAir_OccMask0;
 
-        uniform vec4 ValkyrienAir_ShipAabbMin1;
-        uniform vec4 ValkyrienAir_ShipAabbMax1;
-        uniform vec3 ValkyrienAir_CameraShipPos1;
-        uniform vec4 ValkyrienAir_GridMin1;
-        uniform vec4 ValkyrienAir_GridSize1;
-        uniform mat4 ValkyrienAir_WorldToShip1;
-        uniform usampler2D ValkyrienAir_AirMask1;
-        uniform usampler2D ValkyrienAir_OccMask1;
+	        uniform vec4 ValkyrienAir_ShipAabbMin1;
+	        uniform vec4 ValkyrienAir_ShipAabbMax1;
+	        uniform vec4 ValkyrienAir_GridSize1;
+	        uniform mat4 ValkyrienAir_WorldToShip1;
+	        uniform usampler2D ValkyrienAir_AirMask1;
+	        uniform usampler2D ValkyrienAir_OccMask1;
 
-        uniform vec4 ValkyrienAir_ShipAabbMin2;
-        uniform vec4 ValkyrienAir_ShipAabbMax2;
-        uniform vec3 ValkyrienAir_CameraShipPos2;
-        uniform vec4 ValkyrienAir_GridMin2;
-        uniform vec4 ValkyrienAir_GridSize2;
-        uniform mat4 ValkyrienAir_WorldToShip2;
-        uniform usampler2D ValkyrienAir_AirMask2;
-        uniform usampler2D ValkyrienAir_OccMask2;
+	        uniform vec4 ValkyrienAir_ShipAabbMin2;
+	        uniform vec4 ValkyrienAir_ShipAabbMax2;
+	        uniform vec4 ValkyrienAir_GridSize2;
+	        uniform mat4 ValkyrienAir_WorldToShip2;
+	        uniform usampler2D ValkyrienAir_AirMask2;
+	        uniform usampler2D ValkyrienAir_OccMask2;
 
-        uniform vec4 ValkyrienAir_ShipAabbMin3;
-        uniform vec4 ValkyrienAir_ShipAabbMax3;
-        uniform vec3 ValkyrienAir_CameraShipPos3;
-        uniform vec4 ValkyrienAir_GridMin3;
-        uniform vec4 ValkyrienAir_GridSize3;
-        uniform mat4 ValkyrienAir_WorldToShip3;
-        uniform usampler2D ValkyrienAir_AirMask3;
-        uniform usampler2D ValkyrienAir_OccMask3;
+	        uniform vec4 ValkyrienAir_ShipAabbMin3;
+	        uniform vec4 ValkyrienAir_ShipAabbMax3;
+	        uniform vec4 ValkyrienAir_GridSize3;
+	        uniform mat4 ValkyrienAir_WorldToShip3;
+	        uniform usampler2D ValkyrienAir_AirMask3;
+	        uniform usampler2D ValkyrienAir_OccMask3;
 
         const int VA_MASK_TEX_WIDTH_SHIFT = 12;
         const int VA_MASK_TEX_WIDTH_MASK = (1 << VA_MASK_TEX_WIDTH_SHIFT) - 1;
@@ -168,49 +150,26 @@ public final class ShipWaterPocketShaderInjector {
             return ((word >> uint(bit)) & 1u) != 0u;
         }
 
-        bool va_testOcc(usampler2D occMask, int voxelIdx, int subIdx) {
-            int wordIndex = voxelIdx * VA_OCC_WORDS_PER_VOXEL + (subIdx >> 5);
-            int bit = subIdx & 31;
-            uint word = va_fetchWord(occMask, wordIndex);
-            return ((word >> uint(bit)) & 1u) != 0u;
-        }
+	        bool va_testOcc(usampler2D occMask, int voxelIdx, int subIdx) {
+	            int wordIndex = voxelIdx * VA_OCC_WORDS_PER_VOXEL + (subIdx >> 5);
+	            int bit = subIdx & 31;
+	            uint word = va_fetchWord(occMask, wordIndex);
+	            return ((word >> uint(bit)) & 1u) != 0u;
+	        }
 
-        bool va_shouldDiscardForShip0(vec3 worldPos) {
-            if (ValkyrienAir_GridSize0.x <= 0.0) return false;
-            if (worldPos.x < ValkyrienAir_ShipAabbMin0.x || worldPos.x > ValkyrienAir_ShipAabbMax0.x) return false;
-            if (worldPos.y < ValkyrienAir_ShipAabbMin0.y || worldPos.y > ValkyrienAir_ShipAabbMax0.y) return false;
-            if (worldPos.z < ValkyrienAir_ShipAabbMin0.z || worldPos.z > ValkyrienAir_ShipAabbMax0.z) return false;
+	        bool va_shouldDiscardForShip0(vec3 worldPos) {
+	            if (ValkyrienAir_GridSize0.x <= 0.0) return false;
+	            if (worldPos.x < ValkyrienAir_ShipAabbMin0.x || worldPos.x > ValkyrienAir_ShipAabbMax0.x) return false;
+	            if (worldPos.y < ValkyrienAir_ShipAabbMin0.y || worldPos.y > ValkyrienAir_ShipAabbMax0.y) return false;
+	            if (worldPos.z < ValkyrienAir_ShipAabbMin0.z || worldPos.z > ValkyrienAir_ShipAabbMax0.z) return false;
 
-            vec3 shipPos = (ValkyrienAir_WorldToShip0 * vec4(worldPos, 1.0)).xyz;
-            vec3 localPos = shipPos - ValkyrienAir_GridMin0.xyz;
-            vec3 size = ValkyrienAir_GridSize0.xyz;
-            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
-            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
-
-            ivec3 v = ivec3(floor(localPos));
-            ivec3 isize = ivec3(size);
-            int voxelIdx = v.x + isize.x * (v.y + isize.y * v.z);
-
-            ivec3 sv = ivec3(floor(fract(shipPos) * float(VA_SUB)));
-            sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
-            int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
-
-            if (!VA_DEBUG_IGNORE_OCC_MASK && va_testOcc(ValkyrienAir_OccMask0, voxelIdx, subIdx)) return true;
-            if (va_testAir(ValkyrienAir_AirMask0, voxelIdx)) return true;
-            return false;
-        }
-
-        bool va_shouldDiscardForShip1(vec3 worldPos) {
-            if (ValkyrienAir_GridSize1.x <= 0.0) return false;
-            if (worldPos.x < ValkyrienAir_ShipAabbMin1.x || worldPos.x > ValkyrienAir_ShipAabbMax1.x) return false;
-            if (worldPos.y < ValkyrienAir_ShipAabbMin1.y || worldPos.y > ValkyrienAir_ShipAabbMax1.y) return false;
-            if (worldPos.z < ValkyrienAir_ShipAabbMin1.z || worldPos.z > ValkyrienAir_ShipAabbMax1.z) return false;
-
-            vec3 shipPos = (ValkyrienAir_WorldToShip1 * vec4(worldPos, 1.0)).xyz;
-            vec3 localPos = shipPos - ValkyrienAir_GridMin1.xyz;
-            vec3 size = ValkyrienAir_GridSize1.xyz;
-            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
-            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
+	            // Embeddium path: compute ship-space from world-space directly. Java uploads WorldToShip pre-biased by
+	            // -GridMin, so this yields local grid coordinates directly (GridMin == 0 in practice).
+	            vec3 shipPos = (ValkyrienAir_WorldToShip0 * vec4(worldPos, 1.0)).xyz;
+	            vec3 localPos = shipPos;
+	            vec3 size = ValkyrienAir_GridSize0.xyz;
+	            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
+	            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
 
             ivec3 v = ivec3(floor(localPos));
             ivec3 isize = ivec3(size);
@@ -220,47 +179,22 @@ public final class ShipWaterPocketShaderInjector {
             sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
             int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
 
-            if (!VA_DEBUG_IGNORE_OCC_MASK && va_testOcc(ValkyrienAir_OccMask1, voxelIdx, subIdx)) return true;
-            if (va_testAir(ValkyrienAir_AirMask1, voxelIdx)) return true;
-            return false;
-        }
+            if (va_testOcc(ValkyrienAir_OccMask0, voxelIdx, subIdx)) return true;
+	            if (va_testAir(ValkyrienAir_AirMask0, voxelIdx)) return true;
+	            return false;
+	        }
 
-        bool va_shouldDiscardForShip2(vec3 worldPos) {
-            if (ValkyrienAir_GridSize2.x <= 0.0) return false;
-            if (worldPos.x < ValkyrienAir_ShipAabbMin2.x || worldPos.x > ValkyrienAir_ShipAabbMax2.x) return false;
-            if (worldPos.y < ValkyrienAir_ShipAabbMin2.y || worldPos.y > ValkyrienAir_ShipAabbMax2.y) return false;
-            if (worldPos.z < ValkyrienAir_ShipAabbMin2.z || worldPos.z > ValkyrienAir_ShipAabbMax2.z) return false;
+	        bool va_shouldDiscardForShip1(vec3 worldPos) {
+	            if (ValkyrienAir_GridSize1.x <= 0.0) return false;
+	            if (worldPos.x < ValkyrienAir_ShipAabbMin1.x || worldPos.x > ValkyrienAir_ShipAabbMax1.x) return false;
+	            if (worldPos.y < ValkyrienAir_ShipAabbMin1.y || worldPos.y > ValkyrienAir_ShipAabbMax1.y) return false;
+	            if (worldPos.z < ValkyrienAir_ShipAabbMin1.z || worldPos.z > ValkyrienAir_ShipAabbMax1.z) return false;
 
-            vec3 shipPos = (ValkyrienAir_WorldToShip2 * vec4(worldPos, 1.0)).xyz;
-            vec3 localPos = shipPos - ValkyrienAir_GridMin2.xyz;
-            vec3 size = ValkyrienAir_GridSize2.xyz;
-            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
-            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
-
-            ivec3 v = ivec3(floor(localPos));
-            ivec3 isize = ivec3(size);
-            int voxelIdx = v.x + isize.x * (v.y + isize.y * v.z);
-
-            ivec3 sv = ivec3(floor(fract(shipPos) * float(VA_SUB)));
-            sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
-            int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
-
-            if (!VA_DEBUG_IGNORE_OCC_MASK && va_testOcc(ValkyrienAir_OccMask2, voxelIdx, subIdx)) return true;
-            if (va_testAir(ValkyrienAir_AirMask2, voxelIdx)) return true;
-            return false;
-        }
-
-        bool va_shouldDiscardForShip3(vec3 worldPos) {
-            if (ValkyrienAir_GridSize3.x <= 0.0) return false;
-            if (worldPos.x < ValkyrienAir_ShipAabbMin3.x || worldPos.x > ValkyrienAir_ShipAabbMax3.x) return false;
-            if (worldPos.y < ValkyrienAir_ShipAabbMin3.y || worldPos.y > ValkyrienAir_ShipAabbMax3.y) return false;
-            if (worldPos.z < ValkyrienAir_ShipAabbMin3.z || worldPos.z > ValkyrienAir_ShipAabbMax3.z) return false;
-
-            vec3 shipPos = (ValkyrienAir_WorldToShip3 * vec4(worldPos, 1.0)).xyz;
-            vec3 localPos = shipPos - ValkyrienAir_GridMin3.xyz;
-            vec3 size = ValkyrienAir_GridSize3.xyz;
-            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
-            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
+	            vec3 shipPos = (ValkyrienAir_WorldToShip1 * vec4(worldPos, 1.0)).xyz;
+	            vec3 localPos = shipPos;
+	            vec3 size = ValkyrienAir_GridSize1.xyz;
+	            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
+	            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
 
             ivec3 v = ivec3(floor(localPos));
             ivec3 isize = ivec3(size);
@@ -270,145 +204,74 @@ public final class ShipWaterPocketShaderInjector {
             sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
             int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
 
-            if (!VA_DEBUG_IGNORE_OCC_MASK && va_testOcc(ValkyrienAir_OccMask3, voxelIdx, subIdx)) return true;
+            if (va_testOcc(ValkyrienAir_OccMask1, voxelIdx, subIdx)) return true;
+	            if (va_testAir(ValkyrienAir_AirMask1, voxelIdx)) return true;
+	            return false;
+	        }
+
+	        bool va_shouldDiscardForShip2(vec3 worldPos) {
+	            if (ValkyrienAir_GridSize2.x <= 0.0) return false;
+	            if (worldPos.x < ValkyrienAir_ShipAabbMin2.x || worldPos.x > ValkyrienAir_ShipAabbMax2.x) return false;
+	            if (worldPos.y < ValkyrienAir_ShipAabbMin2.y || worldPos.y > ValkyrienAir_ShipAabbMax2.y) return false;
+	            if (worldPos.z < ValkyrienAir_ShipAabbMin2.z || worldPos.z > ValkyrienAir_ShipAabbMax2.z) return false;
+
+	            vec3 shipPos = (ValkyrienAir_WorldToShip2 * vec4(worldPos, 1.0)).xyz;
+	            vec3 localPos = shipPos;
+	            vec3 size = ValkyrienAir_GridSize2.xyz;
+	            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
+	            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
+
+            ivec3 v = ivec3(floor(localPos));
+            ivec3 isize = ivec3(size);
+            int voxelIdx = v.x + isize.x * (v.y + isize.y * v.z);
+
+            ivec3 sv = ivec3(floor(fract(shipPos) * float(VA_SUB)));
+            sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
+            int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
+
+            if (va_testOcc(ValkyrienAir_OccMask2, voxelIdx, subIdx)) return true;
+	            if (va_testAir(ValkyrienAir_AirMask2, voxelIdx)) return true;
+	            return false;
+	        }
+
+	        bool va_shouldDiscardForShip3(vec3 worldPos) {
+	            if (ValkyrienAir_GridSize3.x <= 0.0) return false;
+	            if (worldPos.x < ValkyrienAir_ShipAabbMin3.x || worldPos.x > ValkyrienAir_ShipAabbMax3.x) return false;
+	            if (worldPos.y < ValkyrienAir_ShipAabbMin3.y || worldPos.y > ValkyrienAir_ShipAabbMax3.y) return false;
+	            if (worldPos.z < ValkyrienAir_ShipAabbMin3.z || worldPos.z > ValkyrienAir_ShipAabbMax3.z) return false;
+
+	            vec3 shipPos = (ValkyrienAir_WorldToShip3 * vec4(worldPos, 1.0)).xyz;
+	            vec3 localPos = shipPos;
+	            vec3 size = ValkyrienAir_GridSize3.xyz;
+	            if (localPos.x < 0.0 || localPos.y < 0.0 || localPos.z < 0.0) return false;
+	            if (localPos.x >= size.x || localPos.y >= size.y || localPos.z >= size.z) return false;
+
+            ivec3 v = ivec3(floor(localPos));
+            ivec3 isize = ivec3(size);
+            int voxelIdx = v.x + isize.x * (v.y + isize.y * v.z);
+
+            ivec3 sv = ivec3(floor(fract(shipPos) * float(VA_SUB)));
+            sv = clamp(sv, ivec3(0), ivec3(VA_SUB - 1));
+            int subIdx = sv.x + VA_SUB * (sv.y + VA_SUB * sv.z);
+
+            if (va_testOcc(ValkyrienAir_OccMask3, voxelIdx, subIdx)) return true;
             if (va_testAir(ValkyrienAir_AirMask3, voxelIdx)) return true;
             return false;
         }
-        """.formatted(INJECT_MARKER, VA_PATCH_APPLIED_MARKER, DEBUG_IGNORE_OCC_MASK ? "true" : "false");
+	        """.formatted(INJECT_MARKER, VA_PATCH_APPLIED_MARKER);
 
-    private static final String EMBEDDIUM_FRAGMENT_MAIN_INJECT = """
-            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5) {
-                vec3 worldPos = valkyrienair_WorldPos + ValkyrienAir_CameraWorldPos + vec3(0.0, -VA_WORLD_SAMPLE_EPS, 0.0);
+	    private static final String EMBEDDIUM_FRAGMENT_MAIN_INJECT = """
+	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && (%s || va_isWaterUv(v_TexCoord))) {
+	                // Sample slightly inside the water volume (below the surface) so we test the water block itself.
+	                vec3 camRelPos = valkyrienair_WorldPos + vec3(0.0, -VA_WORLD_SAMPLE_EPS, 0.0);
+	                vec3 worldPos = camRelPos + ValkyrienAir_CameraWorldPos;
+	                if (va_shouldDiscardForShip0(worldPos) || va_shouldDiscardForShip1(worldPos) ||
+	                    va_shouldDiscardForShip2(worldPos) || va_shouldDiscardForShip3(worldPos)) {
+	                    discard;
+	                }
+	            }
 
-                if (%s) {
-                    fragColor = vec4(1.0, 0.0, 1.0, 1.0);
-                    return;
-                }
-
-                if (%s) {
-                    // Keep the debug visualization narrowly scoped to the same fragments we'd normally consider for
-                    // water culling, so we don't tint unrelated translucent/opaque geometry.
-                    if (%s || va_isWaterUv(v_TexCoord)) {
-                        // Restrict visualization to fragments that are inside ship 0's world AABB.
-                        // This also ensures these uniforms are kept live by the GLSL optimizer in debug mode.
-                        if (worldPos.x < ValkyrienAir_ShipAabbMin0.x || worldPos.x > ValkyrienAir_ShipAabbMax0.x ||
-                            worldPos.y < ValkyrienAir_ShipAabbMin0.y || worldPos.y > ValkyrienAir_ShipAabbMax0.y ||
-                            worldPos.z < ValkyrienAir_ShipAabbMin0.z || worldPos.z > ValkyrienAir_ShipAabbMax0.z) {
-                            // Outside ship 0 AABB: fall through to normal shader output (no debug override).
-                        } else {
-                            vec3 shipPos_dbg = (ValkyrienAir_WorldToShip0 * vec4(worldPos, 1.0)).xyz;
-                            if (any(isnan(shipPos_dbg)) || any(isinf(shipPos_dbg))) {
-                                fragColor = vec4(1.0, 0.5, 0.0, 1.0);
-                                return;
-                            }
-                            vec3 localPos_dbg = shipPos_dbg - ValkyrienAir_GridMin0.xyz;
-                            if (any(isnan(localPos_dbg)) || any(isinf(localPos_dbg))) {
-                                fragColor = vec4(1.0, 0.5, 0.0, 1.0);
-                                return;
-                            }
-                            if (localPos_dbg.x < 0.0 || localPos_dbg.y < 0.0 || localPos_dbg.z < 0.0 ||
-                                localPos_dbg.x >= ValkyrienAir_GridSize0.x || localPos_dbg.y >= ValkyrienAir_GridSize0.y || localPos_dbg.z >= ValkyrienAir_GridSize0.z) {
-                                fragColor = vec4(1.0, 1.0, 0.0, 1.0);
-                                return;
-                            }
-
-                            ivec2 airSize_dbg = textureSize(ValkyrienAir_AirMask0, 0);
-                            ivec2 occSize_dbg = textureSize(ValkyrienAir_OccMask0, 0);
-                            if (airSize_dbg.x <= 0 || airSize_dbg.y <= 0 || occSize_dbg.x <= 0 || occSize_dbg.y <= 0) {
-                                fragColor = vec4(0.0, 1.0, 1.0, 1.0);
-                                return;
-                            }
-
-                            int airWords_dbg = max(1, airSize_dbg.x * airSize_dbg.y);
-                            int occWords_dbg = max(1, occSize_dbg.x * occSize_dbg.y);
-                            uint airAny_dbg = va_fetchWord(ValkyrienAir_AirMask0, 0) |
-                                va_fetchWord(ValkyrienAir_AirMask0, airWords_dbg / 2) |
-                                va_fetchWord(ValkyrienAir_AirMask0, airWords_dbg - 1);
-                            uint occAny_dbg = va_fetchWord(ValkyrienAir_OccMask0, 0) |
-                                va_fetchWord(ValkyrienAir_OccMask0, occWords_dbg / 2) |
-                                va_fetchWord(ValkyrienAir_OccMask0, occWords_dbg - 1);
-                            if ((airAny_dbg | occAny_dbg) == 0u) {
-                                fragColor = vec4(0.0, 1.0, 1.0, 1.0);
-                                return;
-                            }
-
-                            ivec3 v_dbg = ivec3(floor(localPos_dbg));
-                            ivec3 isize_dbg = ivec3(ValkyrienAir_GridSize0.xyz);
-                            int voxelIdx_dbg = v_dbg.x + isize_dbg.x * (v_dbg.y + isize_dbg.y * v_dbg.z);
-
-                            int airBit_dbg = voxelIdx_dbg & 31;
-                            uint airWord_dbg = va_fetchWord(ValkyrienAir_AirMask0, voxelIdx_dbg >> 5);
-                            bool airHit_dbg = ((airWord_dbg >> uint(airBit_dbg)) & 1u) != 0u;
-
-                            bool occHit_dbg = false;
-                            if (!VA_DEBUG_IGNORE_OCC_MASK) {
-                                ivec3 sv_dbg = ivec3(floor(fract(shipPos_dbg) * float(VA_SUB)));
-                                sv_dbg = clamp(sv_dbg, ivec3(0), ivec3(VA_SUB - 1));
-                                int subIdx_dbg = sv_dbg.x + VA_SUB * (sv_dbg.y + VA_SUB * sv_dbg.z);
-                                int occBit_dbg = subIdx_dbg & 31;
-                                int occWordIndex_dbg = voxelIdx_dbg * VA_OCC_WORDS_PER_VOXEL + (subIdx_dbg >> 5);
-                                uint occWord_dbg = va_fetchWord(ValkyrienAir_OccMask0, occWordIndex_dbg);
-                                occHit_dbg = ((occWord_dbg >> uint(occBit_dbg)) & 1u) != 0u;
-                            }
-
-                            if (airHit_dbg) {
-                                fragColor = vec4(0.0, 1.0, 0.0, 1.0);
-                                return;
-                            }
-
-                            // If the sample point falls inside a water-blocking block voxel, approximate the CPU-side
-                            // "find open neighbor cell" behavior by stepping to the nearest voxel face and testing
-                            // the air-pocket mask there.
-                            bool airHitResolved_dbg = false;
-                            if (occHit_dbg) {
-                                // More robust debug-only resolve: search the 3x3x3 neighborhood for any air-pocket voxel.
-                                // This helps distinguish "we're close but sampling the wrong voxel" vs "there is no air
-                                // pocket anywhere near this point".
-                                for (int dz = -1; dz <= 1 && !airHitResolved_dbg; dz++) {
-                                    for (int dy = -1; dy <= 1 && !airHitResolved_dbg; dy++) {
-                                        for (int dx = -1; dx <= 1 && !airHitResolved_dbg; dx++) {
-                                            if (dx == 0 && dy == 0 && dz == 0) continue;
-                                            ivec3 v2_dbg = v_dbg + ivec3(dx, dy, dz);
-                                            if (v2_dbg.x < 0 || v2_dbg.y < 0 || v2_dbg.z < 0 ||
-                                                v2_dbg.x >= isize_dbg.x || v2_dbg.y >= isize_dbg.y || v2_dbg.z >= isize_dbg.z) {
-                                                continue;
-                                            }
-                                            int voxelIdx2_dbg = v2_dbg.x + isize_dbg.x * (v2_dbg.y + isize_dbg.y * v2_dbg.z);
-                                            int airBit2_dbg = voxelIdx2_dbg & 31;
-                                            uint airWord2_dbg = va_fetchWord(ValkyrienAir_AirMask0, voxelIdx2_dbg >> 5);
-                                            airHitResolved_dbg = ((airWord2_dbg >> uint(airBit2_dbg)) & 1u) != 0u;
-                                        }
-                                    }
-                                }
-                            }
-                            if (airHitResolved_dbg) {
-                                fragColor = vec4(0.0, 0.0, 1.0, 1.0);
-                                return;
-                            }
-                            if (occHit_dbg) {
-                                fragColor = vec4(1.0, 0.0, 0.0, 1.0);
-                                return;
-                            }
-                            fragColor = vec4(1.0, 1.0, 1.0, 1.0);
-                            return;
-                        }
-                    }
-                }
-
-                if (%s || va_isWaterUv(v_TexCoord)) {
-                    if (va_shouldDiscardForShip0(worldPos) || va_shouldDiscardForShip1(worldPos) ||
-                        va_shouldDiscardForShip2(worldPos) || va_shouldDiscardForShip3(worldPos)) {
-                        discard;
-                    }
-                }
-            }
-
-        """.formatted(
-            DEBUG_TINT_CULL_TEST ? "true" : "false",
-            DEBUG_CULL_STAGE ? "true" : "false",
-            DEBUG_DISABLE_WATER_UV_FILTER ? "true" : "false",
-            DEBUG_DISABLE_WATER_UV_FILTER ? "true" : "false"
-        );
+	        """.formatted(DEBUG_DISABLE_WATER_UV_FILTER ? "true" : "false");
 
     private static boolean loggedEmbeddiumVertexPatch = false;
     private static boolean loggedEmbeddiumFragmentPatch = false;
@@ -453,7 +316,7 @@ public final class ShipWaterPocketShaderInjector {
             if (DEBUG_LOG && patched.contains(VA_PATCH_APPLIED_MARKER) && path.contains("translucent") && !patched.equals(source)) {
                 LOGGER.info("Patched Embeddium translucent vertex shader for ship water culling: {}", identifier);
             }
-            maybeDumpPatchedShader(identifier, patched, DEBUG_TINT_CULL_TEST);
+            maybeDumpPatchedShader(identifier, patched);
             return patched;
         }
         if (isEmbeddiumBlockLayerShader(path, ".fsh")) {
@@ -468,7 +331,7 @@ public final class ShipWaterPocketShaderInjector {
             if (DEBUG_LOG && patched.contains(VA_PATCH_APPLIED_MARKER) && path.contains("translucent") && !patched.equals(source)) {
                 LOGGER.info("Patched Embeddium translucent fragment shader for ship water culling: {}", identifier);
             }
-            maybeDumpPatchedShader(identifier, patched, DEBUG_TINT_CULL_TEST || DEBUG_CULL_STAGE);
+            maybeDumpPatchedShader(identifier, patched);
             return patched;
         }
 

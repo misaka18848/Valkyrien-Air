@@ -59,8 +59,6 @@ public final class ShipWaterPocketExternalWaterCull {
     private static final boolean DEBUG_EMBEDDIUM_PROGRAM_HANDLES = Boolean.getBoolean("valkyrienair.debugEmbeddiumProgramHandles");
     private static final boolean DEBUG_EMBEDDIUM_MASK_BINDINGS = Boolean.getBoolean("valkyrienair.debugEmbeddiumMaskBindings");
     private static final boolean DEBUG_MASK_STATS = Boolean.getBoolean("valkyrienair.debugMaskStats");
-    private static final boolean DEBUG_CULL_STAGE = Boolean.getBoolean("valkyrienair.debugCullStage");
-    private static final boolean DEBUG_TINT_CULL_TEST = Boolean.getBoolean("valkyrienair.debugTintCullTest");
 
     private static final int MAX_SHIPS = 4;
     private static final int SUB = 8;
@@ -73,10 +71,10 @@ public final class ShipWaterPocketExternalWaterCull {
 
     // Texture units 0/1 are used by Embeddium chunk shaders (block + light).
     //
-    // Default to 8 to avoid collisions with chunk shader samplers and common modded pipelines. We still clamp to the
-    // GlStateManager-tracked texture unit range to avoid crashes (see GLSTATEMANAGER_SAFE_TEXTURE_UNITS).
+    // Default to 2 (right after block/light). We still clamp to the GlStateManager-tracked texture unit range to avoid
+    // crashes (see GLSTATEMANAGER_SAFE_TEXTURE_UNITS).
     // Can be overridden for diagnostics via -Dvalkyrienair.embeddiumMaskBaseUnit=...
-    private static final int BASE_MASK_TEX_UNIT = Integer.getInteger("valkyrienair.embeddiumMaskBaseUnit", 8);
+    private static final int BASE_MASK_TEX_UNIT = Integer.getInteger("valkyrienair.embeddiumMaskBaseUnit", 2);
     // Minecraft/GlStateManager in 1.20.1 tracks a fixed small texture-unit array; exceeding it can crash (see AIOOBE in
     // GlStateManager._bindTexture). Keep our internal usage within this cap.
     private static final int GLSTATEMANAGER_SAFE_TEXTURE_UNITS = 12;
@@ -473,36 +471,33 @@ public final class ShipWaterPocketExternalWaterCull {
         handles.waterOverlayUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterOverlayUv");
         handles.chunkWorldOriginLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ChunkWorldOrigin");
 
-        for (int i = 0; i < MAX_SHIPS; i++) {
-            handles.shipAabbMinLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipAabbMin" + i);
-            handles.shipAabbMaxLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipAabbMax" + i);
-            handles.cameraShipPosLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CameraShipPos" + i);
-            handles.gridMinLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridMin" + i);
-            handles.gridSizeLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridSize" + i);
-            handles.worldToShipLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_WorldToShip" + i);
-            handles.airMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_AirMask" + i);
-            handles.occMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_OccMask" + i);
+		        for (int i = 0; i < MAX_SHIPS; i++) {
+		            handles.shipAabbMinLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipAabbMin" + i);
+		            handles.shipAabbMaxLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipAabbMax" + i);
+		            handles.cameraShipPosLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CameraShipPos" + i);
+		            handles.gridMinLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridMin" + i);
+		            handles.gridSizeLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridSize" + i);
+		            handles.worldToShipLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_WorldToShip" + i);
+		            handles.airMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_AirMask" + i);
+		            handles.occMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_OccMask" + i);
 
-            // AABB is required for normal culling and for debugCullStage visualization gating.
-            // debugTintCullTest does not require ship data at all.
-            final boolean needsAabb = !DEBUG_TINT_CULL_TEST;
-            handles.shipSlotSupported[i] =
-                i < handles.maxMaskSlots &&
-                    (!needsAabb || (handles.shipAabbMinLoc[i] >= 0 && handles.shipAabbMaxLoc[i] >= 0)) &&
-                    handles.gridSizeLoc[i] >= 0 &&
-                    handles.worldToShipLoc[i] >= 0 &&
-                    handles.airMaskLoc[i] >= 0 &&
-                    handles.occMaskLoc[i] >= 0;
-        }
+		            handles.shipSlotSupported[i] =
+		                i < handles.maxMaskSlots &&
+		                    handles.shipAabbMinLoc[i] >= 0 &&
+		                    handles.shipAabbMaxLoc[i] >= 0 &&
+		                    handles.gridSizeLoc[i] >= 0 &&
+		                    handles.worldToShipLoc[i] >= 0 &&
+		                    handles.airMaskLoc[i] >= 0 &&
+		                    handles.occMaskLoc[i] >= 0;
+		        }
 
-        final boolean needsMaskCulling = !DEBUG_TINT_CULL_TEST;
         final boolean requiredOk =
             looksLikeEmbeddiumChunkProgram &&
                 handles.cullEnabledLoc >= 0 &&
                 handles.isShipPassLoc >= 0 &&
-                (!needsMaskCulling || handles.cameraWorldPosLoc >= 0) &&
-                (!needsMaskCulling || handles.maxMaskSlots > 0) &&
-                (!needsMaskCulling || handles.shipSlotSupported[0]);
+                handles.cameraWorldPosLoc >= 0 &&
+                handles.maxMaskSlots > 0 &&
+                handles.shipSlotSupported[0];
 
         // Candidate Embeddium chunk programs: allow partial operation even if some uniforms are optimized out.
         // Slot 0 must have the required uniforms; other slots and core uniforms are optional.
@@ -949,6 +944,9 @@ public final class ShipWaterPocketExternalWaterCull {
         final FloatBuffer buffer = MATRIX_BUFFER.get();
         buffer.clear();
         matrix.get(buffer);
+        // JOML's Matrix4f#get(FloatBuffer) writes via absolute puts and does NOT advance the buffer position.
+        // LWJGL uses the buffer's remaining() to determine how many values to upload.
+        buffer.position(16);
         buffer.flip();
         GL20.glUniformMatrix4fv(location, false, buffer);
     }

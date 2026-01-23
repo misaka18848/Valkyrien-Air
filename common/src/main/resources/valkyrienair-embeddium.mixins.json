@@ -6,6 +6,7 @@
   "client": [
     "MixinSodiumShaderLoader",
     "MixinSodiumGlProgram",
+    "MixinValkyrienSkiesSodiumCompat",
     "MixinEmbeddiumWorldRenderer",
     "MixinEmbeddiumWorldRenderer0_3_31"
   ],
