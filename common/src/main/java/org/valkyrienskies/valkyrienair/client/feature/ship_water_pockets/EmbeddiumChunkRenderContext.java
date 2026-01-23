@@ -1,8 +1,6 @@
 package org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets;
 
 import net.minecraft.world.phys.Vec3;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -14,9 +12,6 @@ import org.jetbrains.annotations.Nullable;
 public final class EmbeddiumChunkRenderContext {
 
     private EmbeddiumChunkRenderContext() {}
-
-    private static final Logger LOGGER = LogManager.getLogger("ValkyrienAir ShipWaterCull");
-    private static final boolean DEBUG_LOG = Boolean.getBoolean("valkyrienair.debugEmbeddiumChunkCamera");
 
     // Matches Embeddium's CameraTransform PRECISION_MODIFIER (RenderRegion.REGION_WIDTH * 16 == 8 * 16 == 128).
     private static final float PRECISION_MODIFIER = 128.0f;
@@ -32,7 +27,6 @@ public final class EmbeddiumChunkRenderContext {
         private double rawX;
         private double rawY;
         private double rawZ;
-        private boolean loggedOnce;
         private int depth;
 
         private final boolean[] activeStack = new boolean[MAX_STACK_DEPTH];
@@ -65,16 +59,6 @@ public final class EmbeddiumChunkRenderContext {
         s.chunkCamX = computeChunkCameraOrigin(rawX);
         s.chunkCamY = computeChunkCameraOrigin(rawY);
         s.chunkCamZ = computeChunkCameraOrigin(rawZ);
-
-        if (DEBUG_LOG && !s.loggedOnce) {
-            s.loggedOnce = true;
-            LOGGER.info(
-                "VA Embeddium chunk camera: raw=({}, {}, {}) chunkOrigin=({}, {}, {}) delta=({}, {}, {})",
-                rawX, rawY, rawZ,
-                s.chunkCamX, s.chunkCamY, s.chunkCamZ,
-                (s.chunkCamX - rawX), (s.chunkCamY - rawY), (s.chunkCamZ - rawZ)
-            );
-        }
     }
 
     public static void pop() {

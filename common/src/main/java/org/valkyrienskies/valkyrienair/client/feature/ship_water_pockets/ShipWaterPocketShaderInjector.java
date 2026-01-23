@@ -4,9 +4,6 @@ import net.minecraft.resources.ResourceLocation;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,15 +18,6 @@ public final class ShipWaterPocketShaderInjector {
     private ShipWaterPocketShaderInjector() {}
 
     private static final Logger LOGGER = LogManager.getLogger("ValkyrienAir ShipWaterCull");
-    private static final boolean DEBUG_LOG = Boolean.getBoolean("valkyrienair.debugShipWaterCull");
-    private static final boolean DUMP_PATCHED_SHADERS = Boolean.getBoolean("valkyrienair.dumpShipWaterCullShaders");
-    private static final boolean DEBUG_DISABLE_WATER_UV_FILTER = Boolean.getBoolean("valkyrienair.debugDisableWaterUvFilter");
-
-    static {
-        if (DEBUG_DISABLE_WATER_UV_FILTER) {
-            LOGGER.info("VA: debugDisableWaterUvFilter enabled — culling applies to all fragments (no water UV gating)");
-        }
-    }
 
     private static final String INJECT_MARKER = "valkyrienair:ship_water_pocket_cull";
     private static final String INJECT_MARKER_VERTEX = "valkyrienair:ship_water_pocket_cull_vertex";
@@ -261,7 +249,7 @@ public final class ShipWaterPocketShaderInjector {
 	        """.formatted(INJECT_MARKER, VA_PATCH_APPLIED_MARKER);
 
 	    private static final String EMBEDDIUM_FRAGMENT_MAIN_INJECT = """
-	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && (%s || va_isWaterUv(v_TexCoord))) {
+	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isWaterUv(v_TexCoord)) {
 	                // Sample slightly inside the water volume (below the surface) so we test the water block itself.
 	                vec3 camRelPos = valkyrienair_WorldPos + vec3(0.0, -VA_WORLD_SAMPLE_EPS, 0.0);
 	                vec3 worldPos = camRelPos + ValkyrienAir_CameraWorldPos;
@@ -271,10 +259,8 @@ public final class ShipWaterPocketShaderInjector {
 	                }
 	            }
 
-	        """.formatted(DEBUG_DISABLE_WATER_UV_FILTER ? "true" : "false");
+	        """;
 
-    private static boolean loggedEmbeddiumVertexPatch = false;
-    private static boolean loggedEmbeddiumFragmentPatch = false;
     private static boolean loggedEmbeddiumVertexPatchFailed = false;
     private static boolean loggedEmbeddiumFragmentPatchFailed = false;
 
@@ -289,7 +275,6 @@ public final class ShipWaterPocketShaderInjector {
             path = path.substring(shadersIdx + "shaders/".length());
         }
         // Keep existing block_layer_* coverage, plus a small allow-list for known Embeddium chunk-shader families.
-        // (We also log matching identifiers in injectSodiumShader() so we can expand safely if needed.)
         return path.startsWith("blocks/block_layer_") || path.startsWith("blocks/fluid_layer_");
     }
 
@@ -305,33 +290,11 @@ public final class ShipWaterPocketShaderInjector {
 
         // Accept both modern ("blocks/...") and older ("shaders/blocks/...") Embeddium shader identifiers.
         if (isEmbeddiumBlockLayerShader(path, ".vsh")) {
-            if (DEBUG_LOG) {
-                LOGGER.info("Embeddium shader matched for VA patch (vsh): {}", identifier);
-            }
             final String patched = injectEmbeddiumVertexShader(source);
-            if (DEBUG_LOG && !loggedEmbeddiumVertexPatch && !patched.equals(source)) {
-                loggedEmbeddiumVertexPatch = true;
-                LOGGER.info("Patched Embeddium vertex shader for ship water culling: {}", identifier);
-            }
-            if (DEBUG_LOG && patched.contains(VA_PATCH_APPLIED_MARKER) && path.contains("translucent") && !patched.equals(source)) {
-                LOGGER.info("Patched Embeddium translucent vertex shader for ship water culling: {}", identifier);
-            }
-            maybeDumpPatchedShader(identifier, patched);
             return patched;
         }
         if (isEmbeddiumBlockLayerShader(path, ".fsh")) {
-            if (DEBUG_LOG) {
-                LOGGER.info("Embeddium shader matched for VA patch (fsh): {}", identifier);
-            }
             final String patched = injectEmbeddiumFragmentShader(source);
-            if (DEBUG_LOG && !loggedEmbeddiumFragmentPatch && !patched.equals(source)) {
-                loggedEmbeddiumFragmentPatch = true;
-                LOGGER.info("Patched Embeddium fragment shader for ship water culling: {}", identifier);
-            }
-            if (DEBUG_LOG && patched.contains(VA_PATCH_APPLIED_MARKER) && path.contains("translucent") && !patched.equals(source)) {
-                LOGGER.info("Patched Embeddium translucent fragment shader for ship water culling: {}", identifier);
-            }
-            maybeDumpPatchedShader(identifier, patched);
             return patched;
         }
 
@@ -366,11 +329,9 @@ public final class ShipWaterPocketShaderInjector {
 
                 final String injection;
                 if (translationIncludesRegionOffset) {
-                    injection = "\n    // VA_WORLDPOS_BRANCH: vert_position_plus_translation\n" +
-                        "    valkyrienair_WorldPos = _vert_position + translation;\n";
+                    injection = "\n    valkyrienair_WorldPos = _vert_position + translation;\n";
                 } else {
-                    injection = "\n    // VA_WORLDPOS_BRANCH: position_plus_regionOffset\n" +
-                        "    valkyrienair_WorldPos = position + vec3(u_RegionOffset);\n";
+                    injection = "\n    valkyrienair_WorldPos = position + vec3(u_RegionOffset);\n";
                 }
                 out = insertAfterFirstRegexLine(out, EMBEDDIUM_VSH_POSITION_LINE, injection);
             }
@@ -379,8 +340,7 @@ public final class ShipWaterPocketShaderInjector {
         if (!out.contains("valkyrienair_WorldPos =")) {
             // Fallback: use translation if present (may be world or camera-relative depending on shader variant).
             out = insertAfterFirstRegexLine(out, EMBEDDIUM_VSH_TRANSLATION_LINE,
-                "\n    // VA_WORLDPOS_BRANCH: vert_position_plus_translation_fallback\n" +
-                    "    valkyrienair_WorldPos = _vert_position + translation;\n");
+                "\n    valkyrienair_WorldPos = _vert_position + translation;\n");
         }
 
         if (!out.contains("valkyrienair_WorldPos =")) {
@@ -389,12 +349,10 @@ public final class ShipWaterPocketShaderInjector {
                 out = insertAfterFirstRegexLine(out, GLSL_VERSION_LINE, EMBEDDIUM_VERTEX_UNIFORM_CHUNK_WORLD_ORIGIN_DECL);
             }
             out = insertAfterFirstRegexLine(out, EMBEDDIUM_VSH_VERT_INIT_LINE,
-                "\n    // VA_WORLDPOS_BRANCH: chunk_world_origin_uniform\n" +
-                    "    valkyrienair_WorldPos = _vert_position + ValkyrienAir_ChunkWorldOrigin;\n");
+                "\n    valkyrienair_WorldPos = _vert_position + ValkyrienAir_ChunkWorldOrigin;\n");
             if (!out.contains("valkyrienair_WorldPos =")) {
                 out = insertAfterFirstRegexLine(out, EMBEDDIUM_MAIN_SIGNATURE,
-                    "\n    // VA_WORLDPOS_BRANCH: chunk_world_origin_uniform\n" +
-                        "    valkyrienair_WorldPos = _vert_position + ValkyrienAir_ChunkWorldOrigin;\n");
+                    "\n    valkyrienair_WorldPos = _vert_position + ValkyrienAir_ChunkWorldOrigin;\n");
             }
         }
 
@@ -505,28 +463,6 @@ public final class ShipWaterPocketShaderInjector {
             return m.group(group);
         } catch (final Exception ignored) {
             return null;
-        }
-    }
-
-    private static void maybeDumpPatchedShader(final ResourceLocation identifier, final String patchedSource) {
-        maybeDumpPatchedShader(identifier, patchedSource, false);
-    }
-
-    private static void maybeDumpPatchedShader(final ResourceLocation identifier, final String patchedSource, final boolean force) {
-        if (!force && !DUMP_PATCHED_SHADERS) return;
-        if (identifier == null || patchedSource == null) return;
-
-        try {
-            // Relative to the MC working directory at runtime.
-            final Path root = Path.of("valkyrienair_shader_dumps");
-            final Path outPath = root.resolve(identifier.getNamespace()).resolve(identifier.getPath());
-            Files.createDirectories(outPath.getParent());
-            Files.writeString(outPath, patchedSource, StandardCharsets.UTF_8);
-        } catch (final Throwable t) {
-            // Don't crash shader load; just report once.
-            if (DEBUG_LOG) {
-                LOGGER.warn("Failed to dump patched shader source for {}", identifier, t);
-            }
         }
     }
 }

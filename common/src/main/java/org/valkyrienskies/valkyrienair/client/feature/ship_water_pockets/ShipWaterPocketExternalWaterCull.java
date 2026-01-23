@@ -55,10 +55,6 @@ public final class ShipWaterPocketExternalWaterCull {
     private ShipWaterPocketExternalWaterCull() {}
 
     private static final Logger LOGGER = LogManager.getLogger("ValkyrienAir ShipWaterCull");
-    private static final boolean DEBUG_LOG = Boolean.getBoolean("valkyrienair.debugShipWaterCull");
-    private static final boolean DEBUG_EMBEDDIUM_PROGRAM_HANDLES = Boolean.getBoolean("valkyrienair.debugEmbeddiumProgramHandles");
-    private static final boolean DEBUG_EMBEDDIUM_MASK_BINDINGS = Boolean.getBoolean("valkyrienair.debugEmbeddiumMaskBindings");
-    private static final boolean DEBUG_MASK_STATS = Boolean.getBoolean("valkyrienair.debugMaskStats");
 
     private static final int MAX_SHIPS = 4;
     private static final int SUB = 8;
@@ -71,10 +67,9 @@ public final class ShipWaterPocketExternalWaterCull {
 
     // Texture units 0/1 are used by Embeddium chunk shaders (block + light).
     //
-    // Default to 2 (right after block/light). We still clamp to the GlStateManager-tracked texture unit range to avoid
+    // Use 2 (right after block/light). We still clamp to the GlStateManager-tracked texture unit range to avoid
     // crashes (see GLSTATEMANAGER_SAFE_TEXTURE_UNITS).
-    // Can be overridden for diagnostics via -Dvalkyrienair.embeddiumMaskBaseUnit=...
-    private static final int BASE_MASK_TEX_UNIT = Integer.getInteger("valkyrienair.embeddiumMaskBaseUnit", 2);
+    private static final int BASE_MASK_TEX_UNIT = 2;
     // Minecraft/GlStateManager in 1.20.1 tracks a fixed small texture-unit array; exceeding it can crash (see AIOOBE in
     // GlStateManager._bindTexture). Keep our internal usage within this cap.
     private static final int GLSTATEMANAGER_SAFE_TEXTURE_UNITS = 12;
@@ -90,9 +85,6 @@ public final class ShipWaterPocketExternalWaterCull {
     private static final class ShipMasks {
         private final long shipId;
         private long geometryRevision;
-
-        private long loggedOccStatsRevision = Long.MIN_VALUE;
-        private long loggedAirStatsRevision = Long.MIN_VALUE;
 
         private int minX;
         private int minY;
@@ -140,12 +132,6 @@ public final class ShipWaterPocketExternalWaterCull {
         private final int programId;
         private boolean supported = false;
         private boolean embeddiumChunkProgram = false;
-        private boolean loggedChunkProgramWithCullUniform = false;
-        private boolean loggedCullEnabled = false;
-        private boolean loggedMissingUniformReport = false;
-        private boolean loggedHandleSummary = false;
-        private boolean loggedMaskBinding0 = false;
-        private boolean loggedMaskUnitClamp = false;
 
         private int regionOffsetLoc = -1;
         private int blockTexLoc = -1;
@@ -202,10 +188,7 @@ public final class ShipWaterPocketExternalWaterCull {
 
     private static boolean everEnabled = false;
     private static boolean shaderEverSupported = false;
-    private static boolean loggedFirstProgramSetupCall = false;
     private static boolean loggedEmbeddiumProgramMissingUniforms = false;
-    private static boolean loggedEmbeddiumProgramSupported = false;
-    private static boolean loggedEmbeddiumSlot0Diagnostics = false;
 
     public static void clear() {
         SHADER.shader = null;
@@ -273,11 +256,6 @@ public final class ShipWaterPocketExternalWaterCull {
 
         RenderSystem.assertOnRenderThread();
 
-        if (DEBUG_LOG && !loggedFirstProgramSetupCall) {
-            loggedFirstProgramSetupCall = true;
-            LOGGER.info("Embeddium program uniform setup invoked (programId={})", programId);
-        }
-
         if (lastLevel != level) {
             clear();
             lastLevel = level;
@@ -299,11 +277,6 @@ public final class ShipWaterPocketExternalWaterCull {
             return;
         }
 
-        if (DEBUG_LOG && !loggedEmbeddiumProgramSupported) {
-            loggedEmbeddiumProgramSupported = true;
-            LOGGER.info("Embeddium chunk shader program {} detected ValkyrienAir culling uniforms", programId);
-        }
-
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) {
             disableProgram(programId);
             return;
@@ -311,10 +284,6 @@ public final class ShipWaterPocketExternalWaterCull {
 
         if (handles.cullEnabledLoc >= 0) {
             GL20.glUniform1f(handles.cullEnabledLoc, 1.0f);
-            if (DEBUG_LOG && !handles.loggedCullEnabled) {
-                handles.loggedCullEnabled = true;
-                LOGGER.info("Enabled ship water culling for Embeddium program {}", programId);
-            }
         }
         everEnabled = true;
 
@@ -440,13 +409,6 @@ public final class ShipWaterPocketExternalWaterCull {
         final int maxSafeUnits = Math.min(maxCombined, GLSTATEMANAGER_SAFE_TEXTURE_UNITS);
         final int availableUnits = maxSafeUnits - BASE_MASK_TEX_UNIT;
         handles.maxMaskSlots = Math.max(0, Math.min(MAX_SHIPS, availableUnits / 2));
-        if (DEBUG_EMBEDDIUM_MASK_BINDINGS && !handles.loggedMaskUnitClamp && handles.maxMaskSlots < MAX_SHIPS) {
-            handles.loggedMaskUnitClamp = true;
-            LOGGER.warn(
-                "VA Embeddium mask units clamped (programId={}): baseUnit={} maxCombinedUnits={} safeUnits={} -> maxMaskSlots={} (of {})",
-                programId, BASE_MASK_TEX_UNIT, maxCombined, maxSafeUnits, handles.maxMaskSlots, MAX_SHIPS
-            );
-        }
 
         handles.regionOffsetLoc = GL20.glGetUniformLocation(programId, "u_RegionOffset");
         handles.blockTexLoc = GL20.glGetUniformLocation(programId, "u_BlockTex");
@@ -457,11 +419,6 @@ public final class ShipWaterPocketExternalWaterCull {
         if (handles.cullEnabledLoc < 0) {
             PROGRAM_HANDLES.put(programId, handles);
             return handles;
-        }
-
-        if (DEBUG_LOG && handles.embeddiumChunkProgram && !handles.loggedChunkProgramWithCullUniform) {
-            handles.loggedChunkProgramWithCullUniform = true;
-            LOGGER.info("Detected translucent chunk program {} with ValkyrienAir culling uniform (u_BlockTex/u_RegionOffset present)", programId);
         }
 
         handles.isShipPassLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_IsShipPass");
@@ -502,47 +459,6 @@ public final class ShipWaterPocketExternalWaterCull {
         // Candidate Embeddium chunk programs: allow partial operation even if some uniforms are optimized out.
         // Slot 0 must have the required uniforms; other slots and core uniforms are optional.
         handles.supported = requiredOk;
-
-        if (DEBUG_EMBEDDIUM_PROGRAM_HANDLES && handles.embeddiumChunkProgram && !handles.loggedHandleSummary) {
-            handles.loggedHandleSummary = true;
-            LOGGER.info(
-                "VA Embeddium program handles (programId={} supported={} embeddiumChunkProgram={} baseMaskUnit={}): " +
-                    "CullEnabled={} IsShipPass={} CameraWorldPos={} GridSize0={} WorldToShip0={} AirMask0={} OccMask0={} ShipAabbMin0={} ShipAabbMax0={}",
-                programId, handles.supported, handles.embeddiumChunkProgram, BASE_MASK_TEX_UNIT,
-                handles.cullEnabledLoc, handles.isShipPassLoc, handles.cameraWorldPosLoc,
-                handles.gridSizeLoc[0], handles.worldToShipLoc[0], handles.airMaskLoc[0], handles.occMaskLoc[0],
-                handles.shipAabbMinLoc[0], handles.shipAabbMaxLoc[0]
-            );
-        }
-
-        if (handles.cullEnabledLoc >= 0 && !handles.supported && !handles.loggedMissingUniformReport) {
-            handles.loggedMissingUniformReport = true;
-            final StringBuilder report = new StringBuilder(2048);
-            report.append("Embeddium program ").append(programId)
-                .append(" VA uniform locations (supported=false, embeddiumChunkProgram=")
-                .append(looksLikeEmbeddiumChunkProgram).append(")\n");
-            report.append("  Embeddium uniforms: u_BlockTex=").append(handles.blockTexLoc)
-                .append(" u_RegionOffset=").append(handles.regionOffsetLoc).append('\n');
-            report.append("  ValkyrienAir_CullEnabled=").append(handles.cullEnabledLoc).append('\n');
-            report.append("  ValkyrienAir_IsShipPass=").append(handles.isShipPassLoc).append('\n');
-            report.append("  ValkyrienAir_CameraWorldPos=").append(handles.cameraWorldPosLoc).append('\n');
-            report.append("  ValkyrienAir_ChunkWorldOrigin=").append(handles.chunkWorldOriginLoc).append('\n');
-            report.append("  ValkyrienAir_WaterStillUv=").append(handles.waterStillUvLoc).append('\n');
-            report.append("  ValkyrienAir_WaterFlowUv=").append(handles.waterFlowUvLoc).append('\n');
-            report.append("  ValkyrienAir_WaterOverlayUv=").append(handles.waterOverlayUvLoc).append('\n');
-            for (int i = 0; i < MAX_SHIPS; i++) {
-                report.append("  [slot ").append(i).append("]\n");
-                report.append("    ValkyrienAir_ShipAabbMin").append(i).append('=').append(handles.shipAabbMinLoc[i]).append('\n');
-                report.append("    ValkyrienAir_ShipAabbMax").append(i).append('=').append(handles.shipAabbMaxLoc[i]).append('\n');
-                report.append("    ValkyrienAir_CameraShipPos").append(i).append('=').append(handles.cameraShipPosLoc[i]).append('\n');
-                report.append("    ValkyrienAir_GridMin").append(i).append('=').append(handles.gridMinLoc[i]).append('\n');
-                report.append("    ValkyrienAir_GridSize").append(i).append('=').append(handles.gridSizeLoc[i]).append('\n');
-                report.append("    ValkyrienAir_WorldToShip").append(i).append('=').append(handles.worldToShipLoc[i]).append('\n');
-                report.append("    ValkyrienAir_AirMask").append(i).append('=').append(handles.airMaskLoc[i]).append('\n');
-                report.append("    ValkyrienAir_OccMask").append(i).append('=').append(handles.occMaskLoc[i]).append('\n');
-            }
-            LOGGER.warn("{}", report);
-        }
 
         programEverSupported |= handles.supported;
         PROGRAM_HANDLES.put(programId, handles);
@@ -826,18 +742,6 @@ public final class ShipWaterPocketExternalWaterCull {
             if (handles.cameraShipPosLoc[slot] >= 0) {
                 GL20.glUniform3f(handles.cameraShipPosLoc[slot], (float) camShipX, (float) camShipY, (float) camShipZ);
             }
-
-            if (slot == 0 && !loggedEmbeddiumSlot0Diagnostics) {
-                loggedEmbeddiumSlot0Diagnostics = true;
-                LOGGER.info(
-                    "VA Embeddium slot0 diagnostics (programId={} shipId={}): ShipAabbMin0=({}, {}, {}) ShipAabbMax0=({}, {}, {}) GridSize0=({}, {}, {}) AirMask0TexId={} OccMask0TexId={}",
-                    handles.programId, shipId,
-                    shipWorldAabbDc.minX(), shipWorldAabbDc.minY(), shipWorldAabbDc.minZ(),
-                    shipWorldAabbDc.maxX(), shipWorldAabbDc.maxY(), shipWorldAabbDc.maxZ(),
-                    sizeX, sizeY, sizeZ,
-                    masks.airTexId, masks.occTexId
-                );
-            }
         }
 
         // Clear stale mask entries for ships that are no longer loaded to avoid leaks.
@@ -900,16 +804,6 @@ public final class ShipWaterPocketExternalWaterCull {
         final int airUnit = BASE_MASK_TEX_UNIT + slot * 2;
         final int occUnit = airUnit + 1;
 
-        final boolean shouldLogOnce = DEBUG_EMBEDDIUM_MASK_BINDINGS && slot == 0 && !handles.loggedMaskBinding0 && (airTexId != 0 || occTexId != 0);
-        if (shouldLogOnce) {
-            final int maxUnits = GL11.glGetInteger(GL20.GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
-            LOGGER.info(
-                "VA Embeddium mask bind (programId={} slot0): baseUnit={} airUnit={} occUnit={} airTexId={} occTexId={} airMaskLoc={} occMaskLoc={} maxCombinedUnits={}",
-                handles.programId, BASE_MASK_TEX_UNIT, airUnit, occUnit, airTexId, occTexId,
-                handles.airMaskLoc[slot], handles.occMaskLoc[slot], maxUnits
-            );
-        }
-
         if (handles.airMaskLoc[slot] >= 0) {
             GL20.glUniform1i(handles.airMaskLoc[slot], airUnit);
         }
@@ -921,19 +815,6 @@ public final class ShipWaterPocketExternalWaterCull {
         GlStateManager._bindTexture(airTexId);
         GlStateManager._activeTexture(GL13.GL_TEXTURE0 + occUnit);
         GlStateManager._bindTexture(occTexId);
-
-        if (shouldLogOnce) {
-            GlStateManager._activeTexture(GL13.GL_TEXTURE0 + airUnit);
-            final int boundAir = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-            GlStateManager._activeTexture(GL13.GL_TEXTURE0 + occUnit);
-            final int boundOcc = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-            LOGGER.info(
-                "VA Embeddium mask bound (programId={} slot0): boundAirTexId={} boundOccTexId={}",
-                handles.programId, boundAir, boundOcc
-            );
-            GlStateManager._activeTexture(GL13.GL_TEXTURE0 + occUnit);
-            handles.loggedMaskBinding0 = true;
-        }
 
         // Avoid surprising other render code by leaving the active texture on a high unit.
         GlStateManager._activeTexture(GL13.GL_TEXTURE0);
@@ -981,9 +862,6 @@ public final class ShipWaterPocketExternalWaterCull {
         }
 
         final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        int nonEmptyShapeBlocks = 0;
-        int nonEmptyShapeFluidBlocks = 0;
-        final int[] solidByY = DEBUG_MASK_STATS ? new int[sizeY] : null;
 
         for (int lz = 0; lz < sizeZ; lz++) {
             for (int ly = 0; ly < sizeY; ly++) {
@@ -995,13 +873,6 @@ public final class ShipWaterPocketExternalWaterCull {
                     if (shape.isEmpty()) {
                         shape = state.getCollisionShape(level, pos);
                         if (shape.isEmpty()) continue;
-                    }
-                    nonEmptyShapeBlocks++;
-                    if (!state.getFluidState().isEmpty()) {
-                        nonEmptyShapeFluidBlocks++;
-                    }
-                    if (solidByY != null) {
-                        solidByY[ly]++;
                     }
 
                     final int voxelIdx = lx + sizeX * (ly + sizeY * lz);
@@ -1039,61 +910,6 @@ public final class ShipWaterPocketExternalWaterCull {
         masks.occBuffer.flip();
 
         uploadIntTexture(masks.occTexId, MASK_TEX_WIDTH, masks.occTexHeight, masks.occBuffer);
-
-        if (DEBUG_MASK_STATS && masks.loggedOccStatsRevision != geometryRevision) {
-            masks.loggedOccStatsRevision = geometryRevision;
-            final int usedWords = Math.min(masks.occData.length, wordCount);
-            final int samples = 256;
-            int sampleNonZero = 0;
-            int sampleAllOnes = 0;
-            long sampleBitCount = 0;
-            for (int i = 0; i < samples; i++) {
-                final int idx = (int) ((long) i * (long) (usedWords - 1) / (long) (samples - 1));
-                final int word = masks.occData[idx];
-                if (word != 0) sampleNonZero++;
-                if (word == -1) sampleAllOnes++;
-                sampleBitCount += Integer.bitCount(word);
-            }
-            final int w0 = usedWords > 0 ? masks.occData[0] : 0;
-            final int wMid = usedWords > 0 ? masks.occData[usedWords / 2] : 0;
-            final int wLast = usedWords > 0 ? masks.occData[usedWords - 1] : 0;
-
-            final StringBuilder solidByYStr = new StringBuilder(64);
-            if (solidByY != null) {
-                solidByYStr.append('[');
-                for (int i = 0; i < solidByY.length; i++) {
-                    if (i > 0) solidByYStr.append(", ");
-                    solidByYStr.append(solidByY[i]);
-                }
-                solidByYStr.append(']');
-            }
-            final int layerArea = sizeX * sizeZ;
-            final StringBuilder fullLayers = new StringBuilder(32);
-            if (solidByY != null && layerArea > 0) {
-                for (int i = 0; i < solidByY.length; i++) {
-                    if (solidByY[i] == layerArea) {
-                        if (fullLayers.length() > 0) fullLayers.append(',');
-                        fullLayers.append(i);
-                    }
-                }
-            }
-
-            LOGGER.info(
-                "VA mask stats (shipId={} rev={}): occ volume={} bounds[min=({}, {}, {}) size=({}, {}, {})] nonEmptyShapeBlocks={} (fluidWithShape={}) solidByY={} fullSolidLayers(yIdx)={} occWords={} occTex={}x{} sampleNonZero={}/{} sampleAllOnes={}/{} sampleAvgBits={}/32 sampleWords=[0x{},0x{},0x{}]",
-                masks.shipId, geometryRevision,
-                sizeX * sizeY * sizeZ,
-                minX, minY, minZ, sizeX, sizeY, sizeZ,
-                nonEmptyShapeBlocks, nonEmptyShapeFluidBlocks,
-                solidByYStr,
-                fullLayers.length() == 0 ? "-" : fullLayers,
-                wordCount, MASK_TEX_WIDTH, masks.occTexHeight,
-                sampleNonZero, samples, sampleAllOnes, samples,
-                (int) Math.round((double) sampleBitCount / (double) samples),
-                Integer.toHexString(w0),
-                Integer.toHexString(wMid),
-                Integer.toHexString(wLast)
-            );
-        }
     }
 
     private static final double AIR_KEY_TRANS_Q = 4.0; // 1/4 block increments
@@ -1187,12 +1003,10 @@ public final class ShipWaterPocketExternalWaterCull {
             waterReachable = masks.renderWaterReachable;
         }
 
-        int airPocketBits = 0;
         if (open != null && waterReachable != null) {
             // air pocket = open && !waterReachable
             for (int idx = open.nextSetBit(0); idx >= 0; idx = open.nextSetBit(idx + 1)) {
                 if (waterReachable.get(idx)) continue;
-                airPocketBits++;
                 final int wordIdx = idx >> 5;
                 final int bit = idx & 31;
 
@@ -1207,33 +1021,6 @@ public final class ShipWaterPocketExternalWaterCull {
         masks.airBuffer.flip();
 
         uploadIntTexture(masks.airTexId, MASK_TEX_WIDTH, masks.airTexHeight, masks.airBuffer);
-
-        if (DEBUG_MASK_STATS && masks.loggedAirStatsRevision != snapshot.getGeometryRevision()) {
-            masks.loggedAirStatsRevision = snapshot.getGeometryRevision();
-            final int usedWords = Math.min(masks.airData.length, wordCount);
-            int nonZeroWords = 0;
-            for (int i = 0; i < usedWords; i++) {
-                if (masks.airData[i] != 0) nonZeroWords++;
-            }
-            final int w0 = usedWords > 0 ? masks.airData[0] : 0;
-            final int wMid = usedWords > 0 ? masks.airData[usedWords / 2] : 0;
-            final int wLast = usedWords > 0 ? masks.airData[usedWords - 1] : 0;
-            LOGGER.info(
-                "VA mask stats (shipId={} rev={}): air volume={} bounds[min=({}, {}, {}) size=({}, {}, {})] openBits={} waterReachableBits={} airPocketBits={} airWords={} nonZeroWords={} airTex={}x{} sampleWords=[0x{},0x{},0x{}]",
-                masks.shipId, snapshot.getGeometryRevision(),
-                volume,
-                snapshot.getMinX(), snapshot.getMinY(), snapshot.getMinZ(),
-                snapshot.getSizeX(), snapshot.getSizeY(), snapshot.getSizeZ(),
-                open != null ? open.cardinality() : -1,
-                waterReachable != null ? waterReachable.cardinality() : -1,
-                airPocketBits,
-                wordCount, nonZeroWords,
-                MASK_TEX_WIDTH, masks.airTexHeight,
-                Integer.toHexString(w0),
-                Integer.toHexString(wMid),
-                Integer.toHexString(wLast)
-            );
-        }
     }
 
     private static int ensureIntTexture(final int existingId, final int width, final int height) {
