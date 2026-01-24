@@ -98,9 +98,7 @@ public final class ShipWaterPocketExternalWaterCull {
 
         private int airTexId;
         private int airTexHeight;
-        private long lastAirUploadTick = Long.MIN_VALUE;
         private long lastAirUploadKey = Long.MIN_VALUE;
-        private final BitSet renderWaterReachable = new BitSet();
 
         private final Matrix4f worldToShip = new Matrix4f();
 
@@ -1025,11 +1023,6 @@ public final class ShipWaterPocketExternalWaterCull {
     private static void updateAirMask(final ClientLevel level, final ShipMasks masks,
         final ShipWaterPocketManager.ClientWaterReachableSnapshot snapshot, final ShipTransform shipTransform,
         final long gameTime, final long airKey) {
-        final boolean newTick = masks.lastAirUploadTick != gameTime;
-        if (!newTick && masks.lastAirUploadKey == airKey) return;
-        masks.lastAirUploadTick = gameTime;
-        masks.lastAirUploadKey = airKey;
-
         final int sizeX = masks.sizeX;
         final int sizeY = masks.sizeY;
         final int sizeZ = masks.sizeZ;
@@ -1045,6 +1038,10 @@ public final class ShipWaterPocketExternalWaterCull {
         masks.airTexId = ensureIntTexture(masks.airTexId, MASK_TEX_WIDTH, height);
         masks.airTexHeight = height;
 
+        final long interiorKey = snapshot.getGeometryRevision();
+        if (masks.lastAirUploadKey == interiorKey && masks.airTexId != 0 && masks.airTexHeight == height) return;
+        masks.lastAirUploadKey = interiorKey;
+
         final int capacity = MASK_TEX_WIDTH * height;
         if (masks.airData == null || masks.airData.length != capacity) {
             masks.airData = new int[capacity];
@@ -1053,31 +1050,10 @@ public final class ShipWaterPocketExternalWaterCull {
             java.util.Arrays.fill(masks.airData, 0);
         }
 
-        final BitSet open = snapshot.getOpen();
-        final BitSet waterReachable;
-        if (newTick) {
-            waterReachable = snapshot.getWaterReachable();
-        } else {
-            ShipWaterPocketManager.computeWaterReachableForRender(
-                level,
-                snapshot.getMinX(),
-                snapshot.getMinY(),
-                snapshot.getMinZ(),
-                snapshot.getSizeX(),
-                snapshot.getSizeY(),
-                snapshot.getSizeZ(),
-                open,
-                snapshot.getInterior(),
-                shipTransform,
-                masks.renderWaterReachable
-            );
-            waterReachable = masks.renderWaterReachable;
-        }
-
-        if (open != null && waterReachable != null) {
-            // air pocket = open && !waterReachable
-            for (int idx = open.nextSetBit(0); idx >= 0; idx = open.nextSetBit(idx + 1)) {
-                if (waterReachable.get(idx)) continue;
+        final BitSet interior = snapshot.getInterior();
+        if (interior != null) {
+            // Cull world-water surfaces inside ship interior volumes (including flooded interiors).
+            for (int idx = interior.nextSetBit(0); idx >= 0; idx = interior.nextSetBit(idx + 1)) {
                 final int wordIdx = idx >> 5;
                 final int bit = idx & 31;
 

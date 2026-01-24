@@ -5,7 +5,6 @@ import net.minecraft.client.renderer.BiomeColors
 import net.minecraft.core.BlockPos
 import net.minecraft.util.Mth
 import org.valkyrienskies.mod.common.hooks.VSGameEvents
-import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketFakeWaterSurfaceRenderer
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCullRenderContext
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketShipWaterTintRenderContext
 
@@ -31,7 +30,6 @@ object ValkyrienAirModClient {
             ShipWaterPocketShipWaterTintRenderContext.pushShipWaterTintRgb(computeShipWaterTintRgb(it.ship))
         }
         VSGameEvents.postRenderShip.on {
-            ShipWaterPocketFakeWaterSurfaceRenderer.onRenderShip(it)
             ShipWaterPocketShipWaterTintRenderContext.popShipWaterTintRgb()
             ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
         }
@@ -41,7 +39,6 @@ object ValkyrienAirModClient {
             ShipWaterPocketShipWaterTintRenderContext.pushShipWaterTintRgb(computeShipWaterTintRgb(it.ship))
         }
         VSGameEvents.postRenderShipSodium.on {
-            ShipWaterPocketFakeWaterSurfaceRenderer.onPostRenderShipSodium(it as Any)
             ShipWaterPocketShipWaterTintRenderContext.popShipWaterTintRgb()
             ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
         }
