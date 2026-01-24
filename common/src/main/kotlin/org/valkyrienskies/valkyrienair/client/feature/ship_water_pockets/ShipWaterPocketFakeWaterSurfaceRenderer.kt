@@ -35,8 +35,11 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
 
     private val WATER_STILL_SPRITE_ID = ResourceLocation("minecraft", "block/water_still")
     private val FAKE_SURFACE_RENDER_TYPE = RenderType.translucent()
-    private const val WORLD_SURFACE_CONTACT_EPS = 1e-3
-    private const val FLUID_HEIGHT_EPS = 1e-6
+    private const val FAKE_SURFACE_HEIGHT = 0.875
+    private const val FAKE_SURFACE_BASE_SHIFT = FAKE_SURFACE_HEIGHT - 1.0
+    private const val FREE_SURFACE_MAX_SCAN_DOWN = 64
+    private const val FREE_SURFACE_MAX_SCAN_UP = 64
+    private const val FREE_SURFACE_CLIP_EPS = 1e-3
 
     private data class UpDir(
         val dx: Int,
@@ -52,6 +55,40 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         val surfaceWaterCells: LongArray,
     )
 
+    private class PolyVert(
+        var sx: Double,
+        var sy: Double,
+        var sz: Double,
+        var u: Float,
+        var v: Float,
+        var worldY: Double,
+    ) {
+        fun setFrom(other: PolyVert) {
+            sx = other.sx
+            sy = other.sy
+            sz = other.sz
+            u = other.u
+            v = other.v
+            worldY = other.worldY
+        }
+
+        fun set(
+            sx: Double,
+            sy: Double,
+            sz: Double,
+            u: Float,
+            v: Float,
+            worldY: Double,
+        ) {
+            this.sx = sx
+            this.sy = sy
+            this.sz = sz
+            this.u = u
+            this.v = v
+            this.worldY = worldY
+        }
+    }
+
     private var cachedLevel: Level? = null
     private val cacheByShipId = HashMap<Long, CachedSurfaces>()
 
@@ -60,6 +97,8 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
     private val tmpCameraShipPos = Vector3d()
     private val tmpWorldBlockPos = BlockPos.MutableBlockPos()
     private val tmpWorldBlockPos2 = BlockPos.MutableBlockPos()
+    private val tmpPolyIn = Array(6) { PolyVert(0.0, 0.0, 0.0, 0f, 0f, 0.0) }
+    private val tmpPolyOut = Array(6) { PolyVert(0.0, 0.0, 0.0, 0f, 0f, 0.0) }
 
     private var cachedWaterSprite: TextureAtlasSprite? = null
 
@@ -371,12 +410,21 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val y = BlockPos.getY(packedPos)
             val z = BlockPos.getZ(packedPos)
 
-            val shift = computeClampShiftShipUnits(level, shipTransform, upDir, x, y, z)
-            // If this surface is at the true world water surface, let vanilla render it and avoid z-fighting/color
-            // differences between "real" and "fake" water.
-            if (!isWorldPointInWater(level, tmpWorldPos.x, tmpWorldPos.y + WORLD_SURFACE_CONTACT_EPS, tmpWorldPos.z)) {
-                continue
-            }
+            // Render the surface slightly below the block boundary to match the look of vanilla water (which is not
+            // flush with the full block height) and reduce z-fighting.
+            val baseShift = FAKE_SURFACE_BASE_SHIFT
+
+            // Determine whether we're near the true world water free surface. If we can find it within a short scan,
+            // clip the fake surface by that plane so it "shrinks" smoothly when the ship emerges at an angle.
+            val centerX = x + 0.5 + upDir.dx * (0.5 + baseShift)
+            val centerY = y + 0.5 + upDir.dy * (0.5 + baseShift)
+            val centerZ = z + 0.5 + upDir.dz * (0.5 + baseShift)
+            tmpShipPos.set(centerX, centerY, centerZ)
+            shipTransform.shipToWorld.transformPosition(tmpShipPos, tmpWorldPos)
+            tmpWorldBlockPos.set(Mth.floor(tmpWorldPos.x), Mth.floor(tmpWorldPos.y), Mth.floor(tmpWorldPos.z))
+
+            val freeSurfaceY = findWorldWaterFreeSurfaceY(level, tmpWorldPos.x, tmpWorldPos.y, tmpWorldPos.z)
+            val clipY = freeSurfaceY?.minus(FREE_SURFACE_CLIP_EPS)
 
             val color = BiomeColors.getAverageWaterColor(level, tmpWorldBlockPos)
             val r = (color shr 16) and 0xFF
@@ -385,127 +433,195 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
 
             val light = LevelRenderer.getLightColor(level, tmpWorldBlockPos)
 
-            withFaceVerticesShipSpace(upDir, x.toDouble(), y.toDouble(), z.toDouble(), shift) { x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3 ->
-                // Only emit one face. The translucent RenderType typically renders with culling disabled, and emitting
-                // both sides causes Z-fighting and makes the surface too opaque/dark (double-blending).
-                emitQuadCameraRelativeShipSpace(
-                    vc,
-                    cameraShipPos,
-                    x0, y0, z0,
-                    x1, y1, z1,
-                    x2, y2, z2,
-                    x3, y3, z3,
-                    u0, v0, u1, v1,
-                    upDir.dx.toFloat(), upDir.dy.toFloat(), upDir.dz.toFloat(),
-                    r, g, b, 0xFF,
-                    light,
+            withFaceVerticesShipSpace(upDir, x.toDouble(), y.toDouble(), z.toDouble(), baseShift) { x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3 ->
+                // Build the base quad (ship-space), then optionally clip it by the world water free surface (world Y).
+                val poly = tmpPolyIn
+                poly[0].set(x0, y0, z0, u0, v0, 0.0)
+                poly[1].set(x1, y1, z1, u0, v1, 0.0)
+                poly[2].set(x2, y2, z2, u1, v1, 0.0)
+                poly[3].set(x3, y3, z3, u1, v0, 0.0)
+
+                for (i in 0 until 4) {
+                    val v = poly[i]
+                    tmpShipPos.set(v.sx, v.sy, v.sz)
+                    shipTransform.shipToWorld.transformPosition(tmpShipPos, tmpWorldPos)
+                    v.worldY = tmpWorldPos.y
+                }
+
+                val clippedCount = if (clipY != null) clipPolyToWorldY(poly, 4, clipY, tmpPolyOut) else 4
+                val clippedPoly = if (clipY != null) tmpPolyOut else poly
+                emitPolyCameraRelativeShipSpace(
+                    vc = vc,
+                    cameraShipPos = cameraShipPos,
+                    poly = clippedPoly,
+                    polySize = clippedCount,
+                    nx = upDir.dx.toFloat(),
+                    ny = upDir.dy.toFloat(),
+                    nz = upDir.dz.toFloat(),
+                    r = r,
+                    g = g,
+                    b = b,
+                    a = 0xFF,
+                    light = light,
                 )
             }
         }
     }
 
-    private fun emitQuadCameraRelativeShipSpace(
+    private fun emitPolyCameraRelativeShipSpace(
         vc: com.mojang.blaze3d.vertex.VertexConsumer,
         cameraShipPos: Vector3d,
-        sx0: Double, sy0: Double, sz0: Double,
-        sx1: Double, sy1: Double, sz1: Double,
-        sx2: Double, sy2: Double, sz2: Double,
-        sx3: Double, sy3: Double, sz3: Double,
-        u0: Float, v0: Float, u1: Float, v1: Float,
-        nx: Float, ny: Float, nz: Float,
-        r: Int, g: Int, b: Int, a: Int,
+        poly: Array<PolyVert>,
+        polySize: Int,
+        nx: Float,
+        ny: Float,
+        nz: Float,
+        r: Int,
+        g: Int,
+        b: Int,
+        a: Int,
         light: Int,
     ) {
-        fun v(sx: Double, sy: Double, sz: Double, u: Float, v: Float) {
-            vc.vertex(sx - cameraShipPos.x, sy - cameraShipPos.y, sz - cameraShipPos.z)
-                .color(r, g, b, a)
-                .uv(u, v)
+        if (polySize < 3) return
+
+        // Emit as triangles, but use degenerate quads so we can keep the standard translucent block RenderType.
+        val v0 = poly[0]
+        var i = 1
+        while (i + 1 < polySize) {
+            val v1 = poly[i]
+            val v2 = poly[i + 1]
+            emitTriangleAsDegenerateQuadCameraRelativeShipSpace(
+                vc,
+                cameraShipPos,
+                v0,
+                v1,
+                v2,
+                nx,
+                ny,
+                nz,
+                r,
+                g,
+                b,
+                a,
+                light,
+            )
+            i++
+        }
+    }
+
+    private fun emitTriangleAsDegenerateQuadCameraRelativeShipSpace(
+        vc: com.mojang.blaze3d.vertex.VertexConsumer,
+        cameraShipPos: Vector3d,
+        a: PolyVert,
+        b: PolyVert,
+        c: PolyVert,
+        nx: Float,
+        ny: Float,
+        nz: Float,
+        r: Int,
+        g: Int,
+        bCol: Int,
+        aCol: Int,
+        light: Int,
+    ) {
+        fun v(p: PolyVert) {
+            vc.vertex(p.sx - cameraShipPos.x, p.sy - cameraShipPos.y, p.sz - cameraShipPos.z)
+                .color(r, g, bCol, aCol)
+                .uv(p.u, p.v)
                 .overlayCoords(OverlayTexture.NO_OVERLAY)
                 .uv2(light)
                 .normal(nx, ny, nz)
                 .endVertex()
         }
 
-        v(sx0, sy0, sz0, u0, v0)
-        v(sx1, sy1, sz1, u0, v1)
-        v(sx2, sy2, sz2, u1, v1)
-        v(sx3, sy3, sz3, u1, v0)
+        v(a)
+        v(b)
+        v(c)
+        v(a) // degenerate 2nd tri
     }
 
-    /**
-     * Computes how far to shift the surface plane downward (in ship units along [upDir]) to ensure the fake surface
-     * never exceeds the local world water surface height.
-     *
-     * Also updates [tmpWorldBlockPos] to a representative world block position near the surface for lighting/tint.
-     */
-    private fun computeClampShiftShipUnits(
-        level: Level,
-        shipTransform: ShipTransform,
-        upDir: UpDir,
-        x: Int,
-        y: Int,
-        z: Int,
-    ): Double {
-        val shipToWorld = shipTransform.shipToWorld
+    private fun clipPolyToWorldY(inPoly: Array<PolyVert>, inSize: Int, clipY: Double, outPoly: Array<PolyVert>): Int {
+        if (inSize <= 0) return 0
 
-        // Sample at the center of the (unshifted) face.
-        val cx = x + 0.5 + upDir.dx * 0.5
-        val cy = y + 0.5 + upDir.dy * 0.5
-        val cz = z + 0.5 + upDir.dz * 0.5
+        var outSize = 0
+        var prev = inPoly[inSize - 1]
+        var prevInside = prev.worldY <= clipY
 
-        tmpShipPos.set(cx, cy, cz)
-        shipToWorld.transformPosition(tmpShipPos, tmpWorldPos)
-        tmpWorldBlockPos.set(Mth.floor(tmpWorldPos.x), Mth.floor(tmpWorldPos.y), Mth.floor(tmpWorldPos.z))
+        var i = 0
+        while (i < inSize) {
+            val cur = inPoly[i]
+            val curInside = cur.worldY <= clipY
 
-        val waterSurfaceY = findWorldWaterSurfaceY(level, tmpWorldPos.x, tmpWorldPos.y, tmpWorldPos.z)
-            ?: return 0.0
+            if (curInside) {
+                if (!prevInside) {
+                    intersectAtWorldY(prev, cur, clipY, outPoly[outSize++])
+                }
+                outPoly[outSize++].setFrom(cur)
+            } else if (prevInside) {
+                intersectAtWorldY(prev, cur, clipY, outPoly[outSize++])
+            }
 
-        val deltaY = waterSurfaceY - tmpWorldPos.y
-        if (deltaY >= 0.0) return 0.0
-        if (upDir.incWorldY <= 1e-12) return 0.0
-
-        // Convert world-space vertical shift to ship-space units along the chosen "up" axis.
-        return deltaY / upDir.incWorldY
-    }
-
-    private fun findWorldWaterSurfaceY(level: Level, x: Double, y: Double, z: Double): Double? {
-        // Fast path: if we're already inside water, use the local fluid height in this block.
-        tmpWorldBlockPos2.set(Mth.floor(x), Mth.floor(y), Mth.floor(z))
-        var fs = level.getFluidState(tmpWorldBlockPos2)
-        if (!fs.isEmpty && fs.`is`(Fluids.WATER)) {
-            val height = fs.getHeight(level, tmpWorldBlockPos2).toDouble()
-            return tmpWorldBlockPos2.y.toDouble() + height
+            prev = cur
+            prevInside = curInside
+            i++
         }
 
-        // Otherwise, scan down a short distance to find the nearest water surface below.
-        val maxScan = 64
+        return outSize
+    }
+
+    private fun intersectAtWorldY(a: PolyVert, b: PolyVert, clipY: Double, out: PolyVert) {
+        val dy = b.worldY - a.worldY
+        val t = if (abs(dy) <= 1e-12) 0.0 else (clipY - a.worldY) / dy
+        val sx = a.sx + (b.sx - a.sx) * t
+        val sy = a.sy + (b.sy - a.sy) * t
+        val sz = a.sz + (b.sz - a.sz) * t
+        val u = a.u + (b.u - a.u) * t.toFloat()
+        val v = a.v + (b.v - a.v) * t.toFloat()
+        out.set(sx, sy, sz, u, v, clipY)
+    }
+
+    private fun findWorldWaterFreeSurfaceY(level: Level, x: Double, y: Double, z: Double): Double? {
         val baseX = Mth.floor(x)
         val baseY = Mth.floor(y)
         val baseZ = Mth.floor(z)
+
+        // Find a water block at/under the sample point.
+        var waterY = Int.MIN_VALUE
+        var waterFs: net.minecraft.world.level.material.FluidState? = null
         var dy = 0
-        while (dy <= maxScan) {
+        while (dy <= FREE_SURFACE_MAX_SCAN_DOWN) {
             tmpWorldBlockPos2.set(baseX, baseY - dy, baseZ)
-            fs = level.getFluidState(tmpWorldBlockPos2)
+            val fs = level.getFluidState(tmpWorldBlockPos2)
             if (!fs.isEmpty && fs.`is`(Fluids.WATER)) {
-                val height = fs.getHeight(level, tmpWorldBlockPos2).toDouble()
-                return tmpWorldBlockPos2.y.toDouble() + height
+                waterY = tmpWorldBlockPos2.y
+                waterFs = fs
+                break
             }
             dy++
         }
+        if (waterFs == null) return null
 
+        // Scan upward to find the *free* surface (where water transitions to non-water).
+        var topY = waterY
+        var topFs = waterFs
+        var up = 0
+        while (up < FREE_SURFACE_MAX_SCAN_UP) {
+            val nextY = topY + 1
+            if (nextY >= level.maxBuildHeight) break
+            tmpWorldBlockPos2.set(baseX, nextY, baseZ)
+            val above = level.getFluidState(tmpWorldBlockPos2)
+            if (above.isEmpty || !above.`is`(Fluids.WATER)) {
+                tmpWorldBlockPos2.set(baseX, topY, baseZ)
+                val height = topFs!!.getHeight(level, tmpWorldBlockPos2).toDouble()
+                return topY.toDouble() + height
+            }
+            topY = nextY
+            topFs = above
+            up++
+        }
+
+        // Free surface is too far above (deep underwater). Don't treat it as "near surface" for blending.
         return null
-    }
-
-    private fun isWorldPointInWater(level: Level, x: Double, y: Double, z: Double): Boolean {
-        tmpWorldBlockPos2.set(Mth.floor(x), Mth.floor(y), Mth.floor(z))
-        val fs = level.getFluidState(tmpWorldBlockPos2)
-        if (fs.isEmpty || !fs.`is`(Fluids.WATER)) return false
-
-        val height = fs.getHeight(level, tmpWorldBlockPos2).toDouble()
-        if (height <= 0.0) return false
-
-        val yInBlock = y - tmpWorldBlockPos2.y.toDouble()
-        return yInBlock < height - FLUID_HEIGHT_EPS
     }
 
     private inline fun withFaceVerticesShipSpace(
