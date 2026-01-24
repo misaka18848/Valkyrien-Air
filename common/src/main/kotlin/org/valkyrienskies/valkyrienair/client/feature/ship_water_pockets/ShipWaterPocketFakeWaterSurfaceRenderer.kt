@@ -34,7 +34,9 @@ import kotlin.math.abs
 object ShipWaterPocketFakeWaterSurfaceRenderer {
 
     private val WATER_STILL_SPRITE_ID = ResourceLocation("minecraft", "block/water_still")
-    private val FAKE_SURFACE_RENDER_TYPE = RenderType.entityTranslucent(InventoryMenu.BLOCK_ATLAS)
+    private val FAKE_SURFACE_RENDER_TYPE = RenderType.translucent()
+    private const val WORLD_SURFACE_CONTACT_EPS = 1e-3
+    private const val FLUID_HEIGHT_EPS = 1e-6
 
     private data class UpDir(
         val dx: Int,
@@ -286,6 +288,13 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val ly = t % sizeY
             val lz = t / sizeY
 
+            // Only render fake surfaces inside the ship AABB (exclude the 1-block padded boundary layer).
+            // This prevents drawing surfaces in the exterior water around the ship.
+            if (lx == 0 || lx + 1 == sizeX || ly == 0 || ly + 1 == sizeY || lz == 0 || lz + 1 == sizeZ) {
+                idx = water.nextSetBit(idx + 1)
+                continue
+            }
+
             if (hasAirAbove(idx, lx, ly, lz)) {
                 val x = snapshot.minX + lx
                 val y = snapshot.minY + ly
@@ -363,6 +372,11 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val z = BlockPos.getZ(packedPos)
 
             val shift = computeClampShiftShipUnits(level, shipTransform, upDir, x, y, z)
+            // If this surface is at the true world water surface, let vanilla render it and avoid z-fighting/color
+            // differences between "real" and "fake" water.
+            if (!isWorldPointInWater(level, tmpWorldPos.x, tmpWorldPos.y + WORLD_SURFACE_CONTACT_EPS, tmpWorldPos.z)) {
+                continue
+            }
 
             val color = BiomeColors.getAverageWaterColor(level, tmpWorldBlockPos)
             val r = (color shr 16) and 0xFF
@@ -372,6 +386,8 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val light = LevelRenderer.getLightColor(level, tmpWorldBlockPos)
 
             withFaceVerticesShipSpace(upDir, x.toDouble(), y.toDouble(), z.toDouble(), shift) { x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3 ->
+                // Only emit one face. The translucent RenderType typically renders with culling disabled, and emitting
+                // both sides causes Z-fighting and makes the surface too opaque/dark (double-blending).
                 emitQuadCameraRelativeShipSpace(
                     vc,
                     cameraShipPos,
@@ -381,18 +397,6 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
                     x3, y3, z3,
                     u0, v0, u1, v1,
                     upDir.dx.toFloat(), upDir.dy.toFloat(), upDir.dz.toFloat(),
-                    r, g, b, 0xFF,
-                    light,
-                )
-                emitQuadCameraRelativeShipSpace(
-                    vc,
-                    cameraShipPos,
-                    x3, y3, z3,
-                    x2, y2, z2,
-                    x1, y1, z1,
-                    x0, y0, z0,
-                    u0, v0, u1, v1,
-                    (-upDir.dx).toFloat(), (-upDir.dy).toFloat(), (-upDir.dz).toFloat(),
                     r, g, b, 0xFF,
                     light,
                 )
@@ -490,6 +494,18 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         }
 
         return null
+    }
+
+    private fun isWorldPointInWater(level: Level, x: Double, y: Double, z: Double): Boolean {
+        tmpWorldBlockPos2.set(Mth.floor(x), Mth.floor(y), Mth.floor(z))
+        val fs = level.getFluidState(tmpWorldBlockPos2)
+        if (fs.isEmpty || !fs.`is`(Fluids.WATER)) return false
+
+        val height = fs.getHeight(level, tmpWorldBlockPos2).toDouble()
+        if (height <= 0.0) return false
+
+        val yInBlock = y - tmpWorldBlockPos2.y.toDouble()
+        return yInBlock < height - FLUID_HEIGHT_EPS
     }
 
     private inline fun withFaceVerticesShipSpace(
