@@ -6,6 +6,7 @@
   "client": [
     "client.MixinCamera",
     "client.MixinMinecraft",
+    "client.renderer.MixinBiomeColors",
     "client.renderer.MixinLevelRenderer",
     "client.renderer.MixinShaderInstance",
     "feature.ship_water_pockets.MixinClientPacketListener"

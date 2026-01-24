@@ -66,6 +66,8 @@ public final class ShipWaterPocketShaderInjector {
         Pattern.compile("(?m)^\\s*in\\s+vec4\\s+v_Color\\s*;\\s*(?://.*)?$");
     private static final Pattern EMBEDDIUM_FSH_OUT_FRAGCOLOR_LINE =
         Pattern.compile("(?m)^\\s*out\\s+vec4\\s+fragColor\\s*;\\s*(?://.*)?$");
+    private static final Pattern EMBEDDIUM_FSH_FRAGCOLOR_ASSIGN_LINE =
+        Pattern.compile("(?m)^\\s*fragColor\\s*=.*;\\s*(?://.*)?$");
     private static final Pattern EMBEDDIUM_MAIN_SIGNATURE =
         Pattern.compile("(?s)\\bvoid\\s+main\\s*\\(\\s*\\)\\s*\\{");
 
@@ -80,6 +82,8 @@ public final class ShipWaterPocketShaderInjector {
         uniform vec4 ValkyrienAir_WaterStillUv;
         uniform vec4 ValkyrienAir_WaterFlowUv;
         uniform vec4 ValkyrienAir_WaterOverlayUv;
+        uniform float ValkyrienAir_ShipWaterTintEnabled;
+        uniform vec3 ValkyrienAir_ShipWaterTint;
 
 	        uniform vec4 ValkyrienAir_ShipAabbMin0;
 	        uniform vec4 ValkyrienAir_ShipAabbMax0;
@@ -248,6 +252,13 @@ public final class ShipWaterPocketShaderInjector {
         }
 	        """.formatted(INJECT_MARKER, VA_PATCH_APPLIED_MARKER);
 
+        private static final String EMBEDDIUM_FRAGMENT_TINT_INJECT = """
+                if (ValkyrienAir_ShipWaterTintEnabled > 0.5 && va_isWaterUv(v_TexCoord)) {
+                    fragColor.rgb *= ValkyrienAir_ShipWaterTint;
+                }
+
+            """;
+
 	    private static final String EMBEDDIUM_FRAGMENT_MAIN_INJECT = """
 	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isWaterUv(v_TexCoord)) {
 	                // Sample slightly inside the water volume (below the surface) so we test the water block itself.
@@ -393,6 +404,9 @@ public final class ShipWaterPocketShaderInjector {
 
         // Inject cull check at the top of main().
         out = insertAfterFirstRegex(out, EMBEDDIUM_MAIN_SIGNATURE, EMBEDDIUM_FRAGMENT_MAIN_INJECT);
+
+        // Inject water tint after the fragment color is assigned.
+        out = insertAfterFirstRegexLine(out, EMBEDDIUM_FSH_FRAGCOLOR_ASSIGN_LINE, EMBEDDIUM_FRAGMENT_TINT_INJECT);
 
         if (!out.contains(INJECT_MARKER) || !out.contains("in vec3 valkyrienair_WorldPos;")) {
             if (!loggedEmbeddiumFragmentPatchFailed) {

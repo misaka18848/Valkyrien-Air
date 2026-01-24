@@ -41,6 +41,8 @@
         { "name": "ValkyrienAir_WaterStillUv", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
         { "name": "ValkyrienAir_WaterFlowUv", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
         { "name": "ValkyrienAir_WaterOverlayUv", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+        { "name": "ValkyrienAir_ShipWaterTintEnabled", "type": "float", "count": 1, "values": [ 0.0 ] },
+        { "name": "ValkyrienAir_ShipWaterTint", "type": "float", "count": 3, "values": [ 1.0, 1.0, 1.0 ] },
 
         { "name": "ValkyrienAir_ShipAabbMin0", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
         { "name": "ValkyrienAir_ShipAabbMax0", "type": "float", "count": 4, "values": [ -1.0, -1.0, -1.0, 0.0 ] },

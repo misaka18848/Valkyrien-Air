@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCull;
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCullRenderContext;
+import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketShipWaterTintRenderContext;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL20;
 
@@ -27,6 +28,9 @@ public abstract class MixinSodiumGlProgram {
         final int programId = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         if (programId == 0) return;
 
+        final boolean shipTintActive = ShipWaterPocketShipWaterTintRenderContext.isActive();
+        final int shipTintRgb = shipTintActive ? ShipWaterPocketShipWaterTintRenderContext.getTintRgb() : 0xFFFFFF;
+
         if (ShipWaterPocketExternalWaterCullRenderContext.isInWorldTranslucentChunkLayer()) {
             final ClientLevel level = ShipWaterPocketExternalWaterCullRenderContext.getLevel();
             if (level != null) {
@@ -36,6 +40,8 @@ public abstract class MixinSodiumGlProgram {
                 if (ShipWaterPocketExternalWaterCullRenderContext.isInShipRender()) {
                     ShipWaterPocketExternalWaterCull.disableProgram(programId);
                     ShipWaterPocketExternalWaterCull.setShipPassProgram(programId, true);
+                    ShipWaterPocketExternalWaterCull.setShipWaterTintEnabledProgram(programId, shipTintActive);
+                    ShipWaterPocketExternalWaterCull.setShipWaterTintProgram(programId, shipTintRgb);
                     return;
                 }
 
@@ -44,6 +50,8 @@ public abstract class MixinSodiumGlProgram {
                     ShipWaterPocketExternalWaterCullRenderContext.getCamY(),
                     ShipWaterPocketExternalWaterCullRenderContext.getCamZ());
                 ShipWaterPocketExternalWaterCull.setShipPassProgram(programId, false);
+                ShipWaterPocketExternalWaterCull.setShipWaterTintEnabledProgram(programId, false);
+                ShipWaterPocketExternalWaterCull.setShipWaterTintProgram(programId, 0xFFFFFF);
                 return;
             }
         }

@@ -25,6 +25,8 @@ uniform vec3 ValkyrienAir_CameraWorldPos;
 uniform vec4 ValkyrienAir_WaterStillUv;
 uniform vec4 ValkyrienAir_WaterFlowUv;
 uniform vec4 ValkyrienAir_WaterOverlayUv;
+uniform float ValkyrienAir_ShipWaterTintEnabled;
+uniform vec3 ValkyrienAir_ShipWaterTint;
 
 uniform vec4 ValkyrienAir_ShipAabbMin0;
 uniform vec4 ValkyrienAir_ShipAabbMax0;
@@ -207,5 +209,8 @@ void main() {
     }
 
     vec4 color = texture(Sampler0, texCoord0) * vertexColor * ColorModulator;
+    if (ValkyrienAir_ShipWaterTintEnabled > 0.5 && va_isWaterUv(texCoord0)) {
+        color.rgb *= ValkyrienAir_ShipWaterTint;
+    }
     fragColor = linear_fog(color, vertexDistance, FogStart, FogEnd, FogColor);
 }

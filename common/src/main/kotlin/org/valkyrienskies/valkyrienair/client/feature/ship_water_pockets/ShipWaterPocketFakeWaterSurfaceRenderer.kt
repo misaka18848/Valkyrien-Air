@@ -6,7 +6,6 @@ import com.mojang.blaze3d.vertex.Tesselator
 import com.mojang.blaze3d.vertex.VertexFormat
 import com.mojang.blaze3d.vertex.VertexSorting
 import net.minecraft.client.Minecraft
-import net.minecraft.client.renderer.BiomeColors
 import net.minecraft.client.renderer.LevelRenderer
 import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.renderer.RenderStateShard
@@ -15,6 +14,7 @@ import net.minecraft.client.renderer.texture.OverlayTexture
 import net.minecraft.client.renderer.texture.TextureAtlasSprite
 import net.minecraft.core.BlockPos
 import net.minecraft.resources.ResourceLocation
+import net.minecraft.tags.FluidTags
 import net.minecraft.util.Mth
 import net.minecraft.world.inventory.InventoryMenu
 import net.minecraft.world.level.Level
@@ -39,7 +39,7 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
 
     private val WATER_STILL_SPRITE_ID = ResourceLocation("minecraft", "block/water_still")
     private val FAKE_SURFACE_RENDER_TYPE = createFakeSurfaceRenderType()
-    private const val FAKE_SURFACE_HEIGHT = 0.875
+    private const val FAKE_SURFACE_HEIGHT = 1.0
     private const val FAKE_SURFACE_BASE_SHIFT = FAKE_SURFACE_HEIGHT - 1.0
     private const val FREE_SURFACE_MAX_SCAN_DOWN = 64
     private const val FREE_SURFACE_MAX_SCAN_UP = 64
@@ -101,6 +101,7 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
     private val tmpCameraShipPos = Vector3d()
     private val tmpWorldBlockPos = BlockPos.MutableBlockPos()
     private val tmpWorldBlockPos2 = BlockPos.MutableBlockPos()
+    private val tmpShipBlockPos = BlockPos.MutableBlockPos()
     private val tmpPolyIn = Array(6) { PolyVert(0.0, 0.0, 0.0, 0f, 0f, 0.0) }
     private val tmpPolyOut = Array(6) { PolyVert(0.0, 0.0, 0.0, 0f, 0f, 0.0) }
 
@@ -342,6 +343,20 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
                 val x = snapshot.minX + lx
                 val y = snapshot.minY + ly
                 val z = snapshot.minZ + lz
+
+                // If the ship has real water (shipyard geometry) touching this boundary, don't render the fake
+                // pressurized surface here. The normal fluid renderer should handle it.
+                tmpShipBlockPos.set(x, y, z)
+                if (level.getFluidState(tmpShipBlockPos).`is`(FluidTags.WATER)) {
+                    idx = water.nextSetBit(idx + 1)
+                    continue
+                }
+                tmpShipBlockPos.set(x + upDir.dx, y + upDir.dy, z + upDir.dz)
+                if (level.getFluidState(tmpShipBlockPos).`is`(FluidTags.WATER)) {
+                    idx = water.nextSetBit(idx + 1)
+                    continue
+                }
+
                 if (count >= out.size) out = out.copyOf(out.size * 2)
                 out[count++] = BlockPos.asLong(x, y, z)
             }
@@ -430,10 +445,11 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val freeSurfaceY = findWorldWaterFreeSurfaceY(level, tmpWorldPos.x, tmpWorldPos.y, tmpWorldPos.z)
             val clipY = freeSurfaceY?.minus(FREE_SURFACE_CLIP_EPS)
 
-            val color = BiomeColors.getAverageWaterColor(level, tmpWorldBlockPos)
-            val r = (color shr 16) and 0xFF
-            val g = (color shr 8) and 0xFF
-            val b = color and 0xFF
+            // Color is applied dynamically at render time to match the ship's world-biome water tint.
+            // Keep fake surface vertices neutral here to avoid double-tinting.
+            val r = 0xFF
+            val g = 0xFF
+            val b = 0xFF
 
             val light = LevelRenderer.getLightColor(level, tmpWorldBlockPos)
 

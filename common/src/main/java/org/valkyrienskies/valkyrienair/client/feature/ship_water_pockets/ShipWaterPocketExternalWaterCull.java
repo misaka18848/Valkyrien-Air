@@ -142,6 +142,8 @@ public final class ShipWaterPocketExternalWaterCull {
         private int waterStillUvLoc = -1;
         private int waterFlowUvLoc = -1;
         private int waterOverlayUvLoc = -1;
+        private int shipWaterTintEnabledLoc = -1;
+        private int shipWaterTintLoc = -1;
         private int chunkWorldOriginLoc = -1;
 
         private int maxMaskSlots = MAX_SHIPS;
@@ -175,6 +177,8 @@ public final class ShipWaterPocketExternalWaterCull {
         private Uniform waterStillUv;
         private Uniform waterFlowUv;
         private Uniform waterOverlayUv;
+        private Uniform shipWaterTintEnabled;
+        private Uniform shipWaterTint;
 
         private final Uniform[] shipAabbMin = new Uniform[MAX_SHIPS];
         private final Uniform[] shipAabbMax = new Uniform[MAX_SHIPS];
@@ -315,6 +319,12 @@ public final class ShipWaterPocketExternalWaterCull {
         if (handles.isShipPassLoc >= 0) {
             GL20.glUniform1f(handles.isShipPassLoc, 0.0f);
         }
+        if (handles.shipWaterTintEnabledLoc >= 0) {
+            GL20.glUniform1f(handles.shipWaterTintEnabledLoc, 0.0f);
+        }
+        if (handles.shipWaterTintLoc >= 0) {
+            GL20.glUniform3f(handles.shipWaterTintLoc, 1.0f, 1.0f, 1.0f);
+        }
     }
 
     public static void setShipPassProgram(final int programId, final boolean shipPass) {
@@ -343,6 +353,15 @@ public final class ShipWaterPocketExternalWaterCull {
             SHADER.isShipPass.set(0.0f);
             SHADER.isShipPass.upload();
         }
+
+        if (SHADER.shipWaterTintEnabled != null) {
+            SHADER.shipWaterTintEnabled.set(0.0f);
+            SHADER.shipWaterTintEnabled.upload();
+        }
+        if (SHADER.shipWaterTint != null) {
+            SHADER.shipWaterTint.set(1.0f, 1.0f, 1.0f);
+            SHADER.shipWaterTint.upload();
+        }
     }
 
     public static void setShipPass(final ShaderInstance shader, final boolean shipPass) {
@@ -355,6 +374,53 @@ public final class ShipWaterPocketExternalWaterCull {
 
         SHADER.isShipPass.set(shipPass ? 1.0f : 0.0f);
         SHADER.isShipPass.upload();
+    }
+
+    public static void setShipWaterTintEnabled(final ShaderInstance shader, final boolean enabled) {
+        if (shader == null) return;
+        if (!SHIP_MASKS.isEmpty()) {
+            bindShaderHandles(shader);
+        }
+        if (!SHADER.supported || SHADER.shipWaterTintEnabled == null) return;
+
+        SHADER.shipWaterTintEnabled.set(enabled ? 1.0f : 0.0f);
+        SHADER.shipWaterTintEnabled.upload();
+    }
+
+    public static void setShipWaterTint(final ShaderInstance shader, final int rgb) {
+        if (shader == null) return;
+        if (!SHIP_MASKS.isEmpty()) {
+            bindShaderHandles(shader);
+        }
+        if (!SHADER.supported || SHADER.shipWaterTint == null) return;
+
+        final float r = ((rgb >> 16) & 0xFF) / 255.0f;
+        final float g = ((rgb >> 8) & 0xFF) / 255.0f;
+        final float b = (rgb & 0xFF) / 255.0f;
+        SHADER.shipWaterTint.set(r, g, b);
+        SHADER.shipWaterTint.upload();
+    }
+
+    public static void setShipWaterTintEnabledProgram(final int programId, final boolean enabled) {
+        if (programId == 0) return;
+        RenderSystem.assertOnRenderThread();
+
+        final ProgramHandles handles = bindProgramHandles(programId);
+        if (handles == null || handles.shipWaterTintEnabledLoc < 0) return;
+        GL20.glUniform1f(handles.shipWaterTintEnabledLoc, enabled ? 1.0f : 0.0f);
+    }
+
+    public static void setShipWaterTintProgram(final int programId, final int rgb) {
+        if (programId == 0) return;
+        RenderSystem.assertOnRenderThread();
+
+        final ProgramHandles handles = bindProgramHandles(programId);
+        if (handles == null || handles.shipWaterTintLoc < 0) return;
+
+        final float r = ((rgb >> 16) & 0xFF) / 255.0f;
+        final float g = ((rgb >> 8) & 0xFF) / 255.0f;
+        final float b = (rgb & 0xFF) / 255.0f;
+        GL20.glUniform3f(handles.shipWaterTintLoc, r, g, b);
     }
 
     private static void bindShaderHandles(final ShaderInstance shader) {
@@ -377,6 +443,8 @@ public final class ShipWaterPocketExternalWaterCull {
         SHADER.waterStillUv = shader.getUniform("ValkyrienAir_WaterStillUv");
         SHADER.waterFlowUv = shader.getUniform("ValkyrienAir_WaterFlowUv");
         SHADER.waterOverlayUv = shader.getUniform("ValkyrienAir_WaterOverlayUv");
+        SHADER.shipWaterTintEnabled = shader.getUniform("ValkyrienAir_ShipWaterTintEnabled");
+        SHADER.shipWaterTint = shader.getUniform("ValkyrienAir_ShipWaterTint");
         if (SHADER.isShipPass == null || SHADER.cameraWorldPos == null || SHADER.waterStillUv == null ||
             SHADER.waterFlowUv == null || SHADER.waterOverlayUv == null) {
             return;
@@ -426,6 +494,8 @@ public final class ShipWaterPocketExternalWaterCull {
         handles.waterStillUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterStillUv");
         handles.waterFlowUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterFlowUv");
         handles.waterOverlayUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterOverlayUv");
+        handles.shipWaterTintEnabledLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipWaterTintEnabled");
+        handles.shipWaterTintLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipWaterTint");
         handles.chunkWorldOriginLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ChunkWorldOrigin");
 
 		        for (int i = 0; i < MAX_SHIPS; i++) {
