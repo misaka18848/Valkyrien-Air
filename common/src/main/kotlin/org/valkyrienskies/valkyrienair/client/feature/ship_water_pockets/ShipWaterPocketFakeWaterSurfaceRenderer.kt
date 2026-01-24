@@ -14,7 +14,6 @@ import net.minecraft.client.renderer.texture.OverlayTexture
 import net.minecraft.client.renderer.texture.TextureAtlasSprite
 import net.minecraft.core.BlockPos
 import net.minecraft.resources.ResourceLocation
-import net.minecraft.tags.FluidTags
 import net.minecraft.util.Mth
 import net.minecraft.world.inventory.InventoryMenu
 import net.minecraft.world.level.Level
@@ -344,15 +343,15 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
                 val y = snapshot.minY + ly
                 val z = snapshot.minZ + lz
 
-                // If the ship has real water (shipyard geometry) touching this boundary, don't render the fake
+                // If the ship has real fluids (shipyard geometry) touching this boundary, don't render the fake
                 // pressurized surface here. The normal fluid renderer should handle it.
                 tmpShipBlockPos.set(x, y, z)
-                if (level.getFluidState(tmpShipBlockPos).`is`(FluidTags.WATER)) {
+                if (!level.getFluidState(tmpShipBlockPos).isEmpty) {
                     idx = water.nextSetBit(idx + 1)
                     continue
                 }
                 tmpShipBlockPos.set(x + upDir.dx, y + upDir.dy, z + upDir.dz)
-                if (level.getFluidState(tmpShipBlockPos).`is`(FluidTags.WATER)) {
+                if (!level.getFluidState(tmpShipBlockPos).isEmpty) {
                     idx = water.nextSetBit(idx + 1)
                     continue
                 }

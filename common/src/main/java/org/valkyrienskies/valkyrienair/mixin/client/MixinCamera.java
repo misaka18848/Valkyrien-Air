@@ -31,11 +31,26 @@ public abstract class MixinCamera {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(instance, blockPos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (original.isEmpty() || !original.is(Fluids.WATER)) return original;
         if (!(instance instanceof final Level level)) return original;
+        if (!original.isEmpty() && !original.is(Fluids.WATER)) return original;
 
         final Vec3 pos = this.getPosition();
         return ShipWaterPocketManager.overrideWaterFluidState(level, pos.x, pos.y, pos.z, original);
     }
-}
 
+    @WrapOperation(
+        method = "getFluidInCamera",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getHeight(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F"
+        )
+    )
+    private float valkyrienair$overrideFluidInCameraHeight(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Float> getHeight) {
+        final float originalHeight = getHeight.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalHeight;
+        if (!(blockGetter instanceof final Level level)) return originalHeight;
+
+        final Float shipHeight = ShipWaterPocketManager.computeShipFluidHeight(level, worldBlockPos);
+        return shipHeight != null ? shipHeight.floatValue() : originalHeight;
+    }
+}

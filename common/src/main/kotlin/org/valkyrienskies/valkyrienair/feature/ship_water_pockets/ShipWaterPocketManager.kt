@@ -20,17 +20,20 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.level.block.state.properties.StairsShape
 import net.minecraft.world.level.block.state.properties.WallSide
 import net.minecraft.world.level.material.Fluids
+import net.minecraft.world.phys.Vec3
 import org.apache.logging.log4j.LogManager
 import org.joml.Vector3d
 import org.joml.primitives.AABBd
 import org.valkyrienskies.core.api.ships.ClientShip
 import org.valkyrienskies.core.api.ships.LoadedShip
+import org.valkyrienskies.core.api.ships.LoadedServerShip
 import org.valkyrienskies.core.api.ships.Ship
 import org.valkyrienskies.core.api.ships.properties.ShipTransform
 import org.valkyrienskies.core.api.world.properties.DimensionId
 import org.valkyrienskies.mod.common.dimensionId
 import org.valkyrienskies.mod.common.isBlockInShipyard
 import org.valkyrienskies.mod.common.shipObjectWorld
+import org.valkyrienskies.mod.common.util.BuoyancyHandlerAttachment
 import org.valkyrienskies.valkyrienair.config.ValkyrienAirConfig
 import java.util.BitSet
 import java.util.concurrent.ConcurrentHashMap
@@ -62,11 +65,22 @@ object ShipWaterPocketManager {
         var flooded: BitSet = BitSet(),
         var materializedWater: BitSet = BitSet(),
         var waterReachable: BitSet = BitSet(),
+        var buoyancy: BuoyancyMetrics = BuoyancyMetrics(),
         var geometryRevision: Long = 0,
         var dirty: Boolean = true,
         var lastFloodUpdateTick: Long = Long.MIN_VALUE,
         var lastWaterReachableUpdateTick: Long = Long.MIN_VALUE,
     )
+
+    private data class BuoyancyMetrics(
+        var sealedAirVolume: Double = 0.0,
+        var floodedVolume: Double = 0.0,
+    ) {
+        fun reset() {
+            sealedAirVolume = 0.0
+            floodedVolume = 0.0
+        }
+    }
 
     private val serverStates: ConcurrentHashMap<DimensionId, ConcurrentHashMap<Long, ShipPocketState>> =
         ConcurrentHashMap()
@@ -78,6 +92,20 @@ object ShipWaterPocketManager {
     private val tmpShipPos: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
     private val tmpShipBlockPos: ThreadLocal<BlockPos.MutableBlockPos> =
         ThreadLocal.withInitial { BlockPos.MutableBlockPos() }
+    private val tmpShipFlowDir: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
+
+    private data class ShipFluidSampleCache(
+        var lastLevel: Level? = null,
+        var lastWorldPosLong: Long = Long.MIN_VALUE,
+        var lastConfigEnabled: Boolean = false,
+        var computed: Boolean = false,
+        var flow: Vec3? = null,
+        var height: Float? = null,
+    )
+
+    private val tmpShipFluidSampleCache: ThreadLocal<ShipFluidSampleCache> =
+        ThreadLocal.withInitial { ShipFluidSampleCache() }
+
     private val tmpFloodQueue: ThreadLocal<IntArray> = ThreadLocal.withInitial { IntArray(0) }
     private val tmpPressureComponentVisited: ThreadLocal<BitSet> = ThreadLocal.withInitial { BitSet() }
     private val tmpPressureSubmerged: ThreadLocal<BitSet> = ThreadLocal.withInitial { BitSet() }
@@ -143,6 +171,7 @@ object ShipWaterPocketManager {
             if (needsRecompute || now != state.lastWaterReachableUpdateTick) {
                 state.waterReachable = computeWaterReachable(level, state, shipTransform)
                 state.lastWaterReachableUpdateTick = now
+                updateVsBuoyancyFromPockets(ship, state)
             }
             if (needsRecompute || now - state.lastFloodUpdateTick >= FLOOD_UPDATE_INTERVAL_TICKS) {
                 updateFlooding(level, ship, state, shipTransform)
@@ -152,6 +181,24 @@ object ShipWaterPocketManager {
 
         // Cleanup unloaded ships
         states.keys.removeIf { !loadedShipIds.contains(it) }
+    }
+
+    private fun updateVsBuoyancyFromPockets(ship: LoadedShip, state: ShipPocketState) {
+        val serverShip = ship as? LoadedServerShip ?: return
+        val buoyancyHandler = serverShip.getAttachment(BuoyancyHandlerAttachment::class.java) ?: return
+
+        // Net buoyancy volume:
+        // - sealed submerged air increases buoyancy
+        // - flooded submerged interior decreases buoyancy (water mass)
+        val sealedAir = state.buoyancy.sealedAirVolume
+        val flooded = state.buoyancy.floodedVolume
+        var net = sealedAir - flooded
+
+        // Avoid crazy values if something goes wrong.
+        val maxAbs = state.interior.cardinality().toDouble().coerceAtLeast(1.0)
+        net = net.coerceIn(-maxAbs, maxAbs)
+
+        buoyancyHandler.buoyancyData.pocketVolumeTotal = net
     }
 
     @JvmStatic
@@ -358,6 +405,98 @@ object ShipWaterPocketManager {
     }
 
     /**
+     * If [worldBlockPos] intersects a ship-space fluid block (shipyard geometry), returns that fluid's flow vector
+     * rotated into world space based on the ship's current transform. Returns null if no ship fluid applies.
+     *
+     * This is used by entity fluid pushing so that ship fluids push entities in the correct direction when ships are
+     * rotated. World water is intentionally unaffected.
+     */
+    @JvmStatic
+    fun computeRotatedShipFluidFlow(level: Level, worldBlockPos: BlockPos): Vec3? {
+        return computeShipFluidSample(level, worldBlockPos).flow
+    }
+
+    private fun computeShipFluidSample(level: Level, worldBlockPos: BlockPos): ShipFluidSampleCache {
+        val cache = tmpShipFluidSampleCache.get()
+        val posLong = worldBlockPos.asLong()
+        val enabled = ValkyrienAirConfig.enableShipWaterPockets
+        if (cache.lastLevel === level && cache.lastWorldPosLong == posLong && cache.lastConfigEnabled == enabled && cache.computed) {
+            return cache
+        }
+
+        cache.lastLevel = level
+        cache.lastWorldPosLong = posLong
+        cache.lastConfigEnabled = enabled
+        cache.computed = true
+        cache.flow = null
+        cache.height = null
+
+        if (!enabled) return cache
+        if (level.isBlockInShipyard(worldBlockPos)) return cache
+
+        val queryAabb = tmpQueryAabb.get().apply {
+            minX = worldBlockPos.x.toDouble()
+            minY = worldBlockPos.y.toDouble()
+            minZ = worldBlockPos.z.toDouble()
+            maxX = (worldBlockPos.x + 1).toDouble()
+            maxY = (worldBlockPos.y + 1).toDouble()
+            maxZ = (worldBlockPos.z + 1).toDouble()
+        }
+        val worldPos = tmpWorldPos.get().set(
+            worldBlockPos.x + 0.5,
+            worldBlockPos.y + 0.5,
+            worldBlockPos.z + 0.5
+        )
+        val shipPosTmp = tmpShipPos.get()
+        val shipBlockPosTmp = tmpShipBlockPos.get()
+        val dir = tmpShipFlowDir.get()
+
+        for (ship in level.shipObjectWorld.loadedShips.getIntersecting(queryAabb, level.dimensionId)) {
+            val shipTransform = getQueryTransform(ship)
+
+            shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
+            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
+
+            val state = getState(level, ship.id)
+            if (state != null && !isOpen(state, shipBlockPosTmp)) {
+                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
+                shipBlockPosTmp.set(openPos)
+            }
+
+            val shipFluid = level.getBlockState(shipBlockPosTmp).fluidState
+            if (shipFluid.isEmpty) continue
+
+            cache.height = shipFluid.getHeight(level, shipBlockPosTmp)
+
+            val shipFlow = shipFluid.getFlow(level, shipBlockPosTmp)
+            if (shipFlow.lengthSqr() < 1.0e-12) {
+                cache.flow = shipFlow
+                return cache
+            }
+
+            dir.set(shipFlow.x, shipFlow.y, shipFlow.z)
+            shipTransform.shipToWorldRotation.transform(dir)
+            cache.flow = Vec3(dir.x, dir.y, dir.z)
+            return cache
+        }
+
+        return cache
+    }
+
+    /**
+     * If [worldBlockPos] intersects a ship-space fluid block (shipyard geometry), returns that fluid's height within
+     * the shipyard cell. Returns null if no ship fluid applies.
+     *
+     * This is required because vanilla/Forge fluid logic computes heights using neighbor block queries, and when ship
+     * fluids are queried from world space the neighbor lookups would otherwise sample world blocks (air) instead of the
+     * shipyard, causing incorrect swimming/overlays (especially for flowing fluids).
+     */
+    @JvmStatic
+    fun computeShipFluidHeight(level: Level, worldBlockPos: BlockPos): Float? {
+        return computeShipFluidSample(level, worldBlockPos).height
+    }
+
+    /**
      * Returns true if the given world-space block position is inside a sealed ship air pocket (i.e. open space that is
      * not reachable by world water).
      *
@@ -487,6 +626,11 @@ object ShipWaterPocketManager {
             val bs = level.getBlockState(tmp)
             val shape = bs.getCollisionShape(level, tmp)
             if (!shape.isEmpty) {
+                // For full blocks, treat the collision shape as a solid hull voxel and pick the open neighbor cell
+                // based on which face the point is closest to. This prevents ambiguous mapping when a world-space point
+                // falls inside a solid ship block due to rotation/rounding (e.g. right on the hull).
+                val fullBlock = bs.isCollisionShapeFullBlock(level, tmp)
+
                 val fx = (x - baseX.toDouble()).coerceIn(0.0, 1.0)
                 val fy = (y - baseY.toDouble()).coerceIn(0.0, 1.0)
                 val fz = (z - baseZ.toDouble()).coerceIn(0.0, 1.0)
@@ -495,6 +639,7 @@ object ShipWaterPocketManager {
                 val boxes: List<AABB> = shape.toAabbs()
 
                 fun contains(px: Double, py: Double, pz: Double): Boolean {
+                    if (fullBlock) return false
                     for (box in boxes) {
                         if (px >= box.minX && px <= box.maxX &&
                             py >= box.minY && py <= box.maxY &&
@@ -621,7 +766,8 @@ object ShipWaterPocketManager {
         val lz = shipPos.z - state.minZ
         if (lx !in 0 until state.sizeX || ly !in 0 until state.sizeY || lz !in 0 until state.sizeZ) return false
         val idx = indexOf(state, lx, ly, lz)
-        return state.open.get(idx) && !state.waterReachable.get(idx)
+        // "Air pocket" is only meaningful for watertight interior cells (not exterior air above the waterline).
+        return state.interior.get(idx) && !state.waterReachable.get(idx)
     }
 
     private fun indexOf(state: ShipPocketState, lx: Int, ly: Int, lz: Int): Int =
@@ -697,11 +843,14 @@ object ShipWaterPocketManager {
             }
         }
 
-        val exterior = floodFillFromBoundary(open, sizeX, sizeY, sizeZ)
-        val interior = BitSet(volume).apply {
-            or(open)
-            andNot(exterior)
-        }
+        // Classify "ship interior" open voxels using a cheap enclosure heuristic based on the ship's watertight blocks.
+        //
+        // We intentionally do *not* require the space to be topologically sealed from the sim bounds, because pressurized
+        // pockets can exist even when there are underwater openings (e.g. a diving bell / bottom hole with trapped air).
+        //
+        // This mask is used for gameplay logic (treating world water as air, redirecting fire placement, etc.), and must
+        // include rooms that are connected to the exterior through submerged holes so physics matches the rendering cull.
+        val interior = computeInteriorMask(open, sizeX, sizeY, sizeZ)
 
         state.open = open
         state.interior = interior
@@ -717,6 +866,139 @@ object ShipWaterPocketManager {
         }
     }
 
+    /**
+     * Computes a conservative approximation of ship-interior air space.
+     *
+     * We treat an open voxel as "interior" if it is enclosed by watertight blocks on **both sides** of at least 2 of the
+     * 3 ship axes. This keeps most real rooms interior even when they have openings (doors/holes), while rejecting the
+     * large exterior volume around the ship.
+     *
+     * This heuristic intentionally errs on the side of classifying *less* space as interior to avoid culling/physics
+     * issues in the ocean around the ship.
+     */
+    private fun computeInteriorMask(open: BitSet, sizeX: Int, sizeY: Int, sizeZ: Int): BitSet {
+        val volumeLong = sizeX.toLong() * sizeY.toLong() * sizeZ.toLong()
+        if (volumeLong <= 0L) return BitSet()
+        val volume = volumeLong.toInt()
+
+        if (open.isEmpty) return BitSet(volume)
+
+        val strideY = sizeX
+        val strideZ = sizeX * sizeY
+
+        val negX = BitSet(volume)
+        val posX = BitSet(volume)
+        val negY = BitSet(volume)
+        val posY = BitSet(volume)
+        val negZ = BitSet(volume)
+        val posZ = BitSet(volume)
+
+        // X direction (for each Y/Z line).
+        for (z in 0 until sizeZ) {
+            for (y in 0 until sizeY) {
+                val base = sizeX * (y + sizeY * z)
+                var seenSolid = false
+                for (x in 0 until sizeX) {
+                    val idx = base + x
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        negX.set(idx)
+                    }
+                }
+                seenSolid = false
+                for (x in sizeX - 1 downTo 0) {
+                    val idx = base + x
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        posX.set(idx)
+                    }
+                }
+            }
+        }
+
+        // Y direction (for each X/Z line).
+        for (z in 0 until sizeZ) {
+            for (x in 0 until sizeX) {
+                var seenSolid = false
+                var idx = x + strideZ * z
+                for (y in 0 until sizeY) {
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        negY.set(idx)
+                    }
+                    idx += strideY
+                }
+                seenSolid = false
+                idx = x + strideZ * z + strideY * (sizeY - 1)
+                for (y in sizeY - 1 downTo 0) {
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        posY.set(idx)
+                    }
+                    idx -= strideY
+                }
+            }
+        }
+
+        // Z direction (for each X/Y line).
+        for (y in 0 until sizeY) {
+            for (x in 0 until sizeX) {
+                var seenSolid = false
+                var idx = x + strideY * y
+                for (z in 0 until sizeZ) {
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        negZ.set(idx)
+                    }
+                    idx += strideZ
+                }
+                seenSolid = false
+                idx = x + strideY * y + strideZ * (sizeZ - 1)
+                for (z in sizeZ - 1 downTo 0) {
+                    if (!open.get(idx)) {
+                        seenSolid = true
+                    } else if (seenSolid) {
+                        posZ.set(idx)
+                    }
+                    idx -= strideZ
+                }
+            }
+        }
+
+        val interior = BitSet(volume)
+        var idx = open.nextSetBit(0)
+        while (idx >= 0 && idx < volume) {
+            val lx = idx % sizeX
+            val t = idx / sizeX
+            val ly = t % sizeY
+            val lz = t / sizeY
+
+            // Never classify the padded boundary layer as interior.
+            if (lx == 0 || lx + 1 == sizeX || ly == 0 || ly + 1 == sizeY || lz == 0 || lz + 1 == sizeZ) {
+                idx = open.nextSetBit(idx + 1)
+                continue
+            }
+
+            var axisPairs = 0
+            if (negX.get(idx) && posX.get(idx)) axisPairs++
+            if (negY.get(idx) && posY.get(idx)) axisPairs++
+            if (negZ.get(idx) && posZ.get(idx)) axisPairs++
+
+            if (axisPairs >= 2) {
+                interior.set(idx)
+            }
+
+            idx = open.nextSetBit(idx + 1)
+        }
+
+        return interior
+    }
+
     private fun computeWaterReachableWithPressure(
         level: Level,
         minX: Int,
@@ -726,10 +1008,15 @@ object ShipWaterPocketManager {
         sizeY: Int,
         sizeZ: Int,
         open: BitSet,
+        interior: BitSet,
         shipTransform: ShipTransform,
         out: BitSet,
+        buoyancyOut: BuoyancyMetrics? = null,
     ): BitSet {
         out.clear()
+
+        val buoyancy = buoyancyOut
+        buoyancy?.reset()
 
         val volumeLong = sizeX.toLong() * sizeY.toLong() * sizeZ.toLong()
         if (volumeLong <= 0 || volumeLong > MAX_SIM_VOLUME.toLong()) return out
@@ -743,28 +1030,17 @@ object ShipWaterPocketManager {
             tmpFloodQueue.set(componentQueue)
         }
 
-        val componentVisited = tmpPressureComponentVisited.get()
-        componentVisited.clear()
+        var waterQueue = tmpPressureHeapIdx.get()
+        if (waterQueue.size < volume) {
+            waterQueue = IntArray(volume)
+            tmpPressureHeapIdx.set(waterQueue)
+        }
+
+        val interiorVisited = tmpPressureComponentVisited.get()
+        interiorVisited.clear()
 
         val submerged = tmpPressureSubmerged.get()
         submerged.clear()
-
-        var escapeHeight = tmpPressureEscapeHeight.get()
-        if (escapeHeight.size < volume) {
-            escapeHeight = DoubleArray(volume)
-            tmpPressureEscapeHeight.set(escapeHeight)
-        }
-
-        var heapIdx = tmpPressureHeapIdx.get()
-        if (heapIdx.size < volume) {
-            heapIdx = IntArray(volume)
-            tmpPressureHeapIdx.set(heapIdx)
-        }
-        var heapPos = tmpPressureHeapPos.get()
-        if (heapPos.size < volume) {
-            heapPos = IntArray(volume)
-            tmpPressureHeapPos.set(heapPos)
-        }
 
         val worldPosTmp = Vector3d()
         val shipPosTmp = Vector3d()
@@ -787,536 +1063,234 @@ object ShipWaterPocketManager {
             )
         }
 
-        // Cache which open cells are submerged in world water. We use this mask many times and it is much cheaper to
-        // query a BitSet than to re-run the world sampling logic.
+        // Cache which open cells are submerged in world water.
         var idx = open.nextSetBit(0)
         while (idx >= 0 && idx < volume) {
             if (shipCellSubmerged(idx)) submerged.set(idx)
             idx = open.nextSetBit(idx + 1)
         }
 
-        val baseShipX = minX + 0.5
-        val baseShipY = minY + 0.5
-        val baseShipZ = minZ + 0.5
-
-        shipPosTmp.set(baseShipX, baseShipY, baseShipZ)
-        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
-        val baseWorldX = worldPosTmp.x
-        val baseWorldY = worldPosTmp.y
-        val baseWorldZ = worldPosTmp.z
-
-        // World-space Y is an affine function of ship-space x/y/z. Sample it once to get a fast linear map.
-        // Also compute axis step vectors so "wall inlet" classification is robust even if the transform isn't unit scale.
-        val dX = Vector3d()
-        val dY = Vector3d()
-        val dZ = Vector3d()
-
-        shipPosTmp.set(baseShipX + 1.0, baseShipY, baseShipZ)
-        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
-        dX.set(worldPosTmp.x - baseWorldX, worldPosTmp.y - baseWorldY, worldPosTmp.z - baseWorldZ)
-
-        shipPosTmp.set(baseShipX, baseShipY + 1.0, baseShipZ)
-        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
-        dY.set(worldPosTmp.x - baseWorldX, worldPosTmp.y - baseWorldY, worldPosTmp.z - baseWorldZ)
-
-        shipPosTmp.set(baseShipX, baseShipY, baseShipZ + 1.0)
-        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
-        dZ.set(worldPosTmp.x - baseWorldX, worldPosTmp.y - baseWorldY, worldPosTmp.z - baseWorldZ)
-
-        val incX = dX.y
-        val incY = dY.y
-        val incZ = dZ.y
-        val maxStepWorldY = maxOf(kotlin.math.abs(incX), kotlin.math.abs(incY), kotlin.math.abs(incZ))
-
-        // Determine which ship axis is most aligned with world up (treat that as the "vertical end" axis).
-        // The other four faces are treated as "walls" for the special-case flooding rule:
-        // submerged wall holes always flood regardless of trapped air.
-        //
-        // Use transformed face normals (cross products) so this remains correct even if the transform isn't unit scale.
-        val nX = Vector3d(dY).cross(dZ)
-        val nY = Vector3d(dZ).cross(dX)
-        val nZ = Vector3d(dX).cross(dY)
-
-        fun verticalFrac(normal: Vector3d): Double {
-            val len = normal.length()
-            if (len <= 1e-12) return 0.0
-            return kotlin.math.abs(normal.y) / len
-        }
-
-        val vX = verticalFrac(nX)
-        val vY = verticalFrac(nY)
-        val vZ = verticalFrac(nZ)
-
-        val verticalAxis =
-            if (vY >= vX && vY >= vZ) 1 else if (vX >= vZ) 0 else 2 // 0=X, 1=Y, 2=Z
-
-        val isWallFaceX = verticalAxis != 0
-        val isWallFaceY = verticalAxis != 1
-        val isWallFaceZ = verticalAxis != 2
-
         val strideY = sizeX
         val strideZ = sizeX * sizeY
 
-        fun isBoundary(lx: Int, ly: Int, lz: Int): Boolean {
-            return lx == 0 || lx + 1 == sizeX || ly == 0 || ly + 1 == sizeY || lz == 0 || lz + 1 == sizeZ
+        // Compute an affine map from local ship voxel coords -> world Y. This is much faster than per-point transforms.
+        val baseShipX = minX.toDouble()
+        val baseShipY = minY.toDouble()
+        val baseShipZ = minZ.toDouble()
+
+        shipPosTmp.set(baseShipX, baseShipY, baseShipZ)
+        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+        val baseWorldY = worldPosTmp.y
+
+        shipPosTmp.set(baseShipX + 1.0, baseShipY, baseShipZ)
+        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+        val incX = worldPosTmp.y - baseWorldY
+
+        shipPosTmp.set(baseShipX, baseShipY + 1.0, baseShipZ)
+        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+        val incY = worldPosTmp.y - baseWorldY
+
+        shipPosTmp.set(baseShipX, baseShipY, baseShipZ + 1.0)
+        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+        val incZ = worldPosTmp.y - baseWorldY
+
+        fun worldYAtLocal(x: Double, y: Double, z: Double): Double {
+            return baseWorldY + incX * x + incY * y + incZ * z
         }
 
-        // Analyze each open component that is exposed to world water on the bounds.
-        forEachBoundaryIndex(sizeX, sizeY, sizeZ) { boundaryIdx ->
-            if (!open.get(boundaryIdx)) return@forEachBoundaryIndex
-            if (componentVisited.get(boundaryIdx)) return@forEachBoundaryIndex
-            if (!submerged.get(boundaryIdx)) return@forEachBoundaryIndex
+        fun cellCenterWorldY(lx: Int, ly: Int, lz: Int): Double {
+            return baseWorldY + incX * (lx + 0.5) + incY * (ly + 0.5) + incZ * (lz + 0.5)
+        }
 
-            // Flood-fill the full connected open component.
+        fun cellMaxWorldY(lx: Int, ly: Int, lz: Int): Double {
+            val x0 = lx.toDouble()
+            val y0 = ly.toDouble()
+            val z0 = lz.toDouble()
+            val x1 = x0 + 1.0
+            val y1 = y0 + 1.0
+            val z1 = z0 + 1.0
+
+            // Highest world-space point of this voxel cell (max of its 8 corners).
+            return maxOf(
+                worldYAtLocal(x0, y0, z0),
+                worldYAtLocal(x1, y0, z0),
+                worldYAtLocal(x0, y1, z0),
+                worldYAtLocal(x1, y1, z0),
+                worldYAtLocal(x0, y0, z1),
+                worldYAtLocal(x1, y0, z1),
+                worldYAtLocal(x0, y1, z1),
+                worldYAtLocal(x1, y1, z1),
+            )
+        }
+
+        // 1) Flood-fill exterior world water. This ensures we never cull ocean water around the ship.
+        run {
             var head = 0
             var tail = 0
-            componentVisited.set(boundaryIdx)
-            componentQueue[tail++] = boundaryIdx
 
-            fun enqueueComponent(idx: Int) {
-                if (!open.get(idx) || componentVisited.get(idx)) return
-                componentVisited.set(idx)
-                componentQueue[tail++] = idx
+            fun tryEnqueueExterior(i: Int) {
+                if (!open.get(i) || interior.get(i)) return
+                if (!submerged.get(i) || out.get(i)) return
+                out.set(i)
+                componentQueue[tail++] = i
+            }
+
+            forEachBoundaryIndex(sizeX, sizeY, sizeZ) { boundaryIdx ->
+                tryEnqueueExterior(boundaryIdx)
             }
 
             while (head < tail) {
-                val idx = componentQueue[head++]
+                val cur = componentQueue[head++]
 
-                val lx = idx % sizeX
-                val t = idx / sizeX
+                val lx = cur % sizeX
+                val t = cur / sizeX
                 val ly = t % sizeY
                 val lz = t / sizeY
 
-                if (lx > 0) enqueueComponent(idx - 1)
-                if (lx + 1 < sizeX) enqueueComponent(idx + 1)
-                if (ly > 0) enqueueComponent(idx - strideY)
-                if (ly + 1 < sizeY) enqueueComponent(idx + strideY)
-                if (lz > 0) enqueueComponent(idx - strideZ)
-                if (lz + 1 < sizeZ) enqueueComponent(idx + strideZ)
+                if (lx > 0) tryEnqueueExterior(cur - 1)
+                if (lx + 1 < sizeX) tryEnqueueExterior(cur + 1)
+                if (ly > 0) tryEnqueueExterior(cur - strideY)
+                if (ly + 1 < sizeY) tryEnqueueExterior(cur + strideY)
+                if (lz > 0) tryEnqueueExterior(cur - strideZ)
+                if (lz + 1 < sizeZ) tryEnqueueExterior(cur + strideZ)
+            }
+        }
+
+        // 2) For each interior air-space component, compute holes to outside and fill water to the highest submerged hole.
+        val planeEps = 1e-6
+
+        var start = interior.nextSetBit(0)
+        while (start >= 0 && start < volume) {
+            if (interiorVisited.get(start) || !open.get(start)) {
+                start = interior.nextSetBit(start + 1)
+                continue
             }
 
-            val componentSize = tail
-            if (componentSize <= 0) return@forEachBoundaryIndex
+            var head = 0
+            var tail = 0
+            interiorVisited.set(start)
+            componentQueue[tail++] = start
 
-            // If outside water can enter this component through a submerged wall hole, treat it as "unpressurized":
-            // submerged wall holes always flood regardless of trapped air.
-            //
-            // IMPORTANT: We must detect actual hull openings, not just "this component is big enough that boundary water
-            // can move inward".
-            //
-            // In simple geometry, a hull wall hole is often 1 block in from the padded sim bounds (POCKET_BOUNDS_PADDING=1),
-            // but with complex ships the AABB can be extended by protrusions, and a real exterior wall can be recessed
-            // many blocks from the AABB face. Detect holes at any depth by requiring:
-            // - the opening looks like a tight passage (solid blocks lateral to the axis),
-            // - there is submerged open space on the outside side, and
-            // - there is an unobstructed open line from that outside side to the sim bounds face (same slice), and
-            // - the "inside" side is not just empty space all the way to the opposite bounds face (helps avoid false
-            //   positives in outside-of-ship cavities created by complex ship AABBs).
-            var hasSubmergedWallHole = false
-            var wallHoleSeedIdx = -1
+            var hasAirVent = false
+            var waterLevel = Double.NEGATIVE_INFINITY
+            var seedCount = 0
 
-            fun lateralSolidCountForX(idx: Int, ly: Int, lz: Int): Int {
-                var solids = 0
-                if (ly > 0 && !open.get(idx - strideY)) solids++
-                if (ly + 1 < sizeY && !open.get(idx + strideY)) solids++
-                if (lz > 0 && !open.get(idx - strideZ)) solids++
-                if (lz + 1 < sizeZ && !open.get(idx + strideZ)) solids++
-                return solids
-            }
+            fun processHole(curIdx: Int, lx: Int, ly: Int, lz: Int, nIdx: Int) {
+                if (!open.get(nIdx) || interior.get(nIdx)) return
 
-            fun lateralSolidCountForY(idx: Int, lx: Int, lz: Int): Int {
-                var solids = 0
-                if (lx > 0 && !open.get(idx - 1)) solids++
-                if (lx + 1 < sizeX && !open.get(idx + 1)) solids++
-                if (lz > 0 && !open.get(idx - strideZ)) solids++
-                if (lz + 1 < sizeZ && !open.get(idx + strideZ)) solids++
-                return solids
-            }
-
-            fun lateralSolidCountForZ(idx: Int, lx: Int, ly: Int): Int {
-                var solids = 0
-                if (lx > 0 && !open.get(idx - 1)) solids++
-                if (lx + 1 < sizeX && !open.get(idx + 1)) solids++
-                if (ly > 0 && !open.get(idx - strideY)) solids++
-                if (ly + 1 < sizeY && !open.get(idx + strideY)) solids++
-                return solids
-            }
-
-            fun openLineToMinX(fromIdx: Int, fromLx: Int): Boolean {
-                var idx = fromIdx
-                var lx = fromLx
-                while (lx >= 0) {
-                    if (!open.get(idx)) return false
-                    idx--
-                    lx--
+                if (submerged.get(nIdx)) {
+                    // Submerged hull opening: water can enter. Track the highest submerged opening as the fill level.
+                    waterLevel = maxOf(waterLevel, cellMaxWorldY(lx, ly, lz))
+                    waterQueue[seedCount++] = curIdx
+                } else {
+                    // Non-submerged opening to the exterior air: air can escape, so the pocket is unpressurized.
+                    hasAirVent = true
                 }
-                return true
             }
 
-            fun openLineToMaxX(fromIdx: Int, fromLx: Int): Boolean {
-                var idx = fromIdx
-                var lx = fromLx
-                while (lx < sizeX) {
-                    if (!open.get(idx)) return false
-                    idx++
-                    lx++
-                }
-                return true
+            fun enqueueInterior(i: Int) {
+                if (!open.get(i) || !interior.get(i) || interiorVisited.get(i)) return
+                interiorVisited.set(i)
+                componentQueue[tail++] = i
             }
 
-            fun openLineToMinY(fromIdx: Int, fromLy: Int): Boolean {
-                var idx = fromIdx
-                var ly = fromLy
-                while (ly >= 0) {
-                    if (!open.get(idx)) return false
-                    idx -= strideY
-                    ly--
-                }
-                return true
-            }
+            while (head < tail) {
+                val cur = componentQueue[head++]
 
-            fun openLineToMaxY(fromIdx: Int, fromLy: Int): Boolean {
-                var idx = fromIdx
-                var ly = fromLy
-                while (ly < sizeY) {
-                    if (!open.get(idx)) return false
-                    idx += strideY
-                    ly++
-                }
-                return true
-            }
-
-            fun openLineToMinZ(fromIdx: Int, fromLz: Int): Boolean {
-                var idx = fromIdx
-                var lz = fromLz
-                while (lz >= 0) {
-                    if (!open.get(idx)) return false
-                    idx -= strideZ
-                    lz--
-                }
-                return true
-            }
-
-            fun openLineToMaxZ(fromIdx: Int, fromLz: Int): Boolean {
-                var idx = fromIdx
-                var lz = fromLz
-                while (lz < sizeZ) {
-                    if (!open.get(idx)) return false
-                    idx += strideZ
-                    lz++
-                }
-                return true
-            }
-
-            for (i in 0 until componentSize) {
-                val idx = componentQueue[i]
-                if (!submerged.get(idx)) continue
-                val lx = idx % sizeX
-                val t = idx / sizeX
+                val lx = cur % sizeX
+                val t = cur / sizeX
                 val ly = t % sizeY
                 val lz = t / sizeY
-                if (isBoundary(lx, ly, lz)) continue
 
-                if (isWallFaceX && sizeX > 2) {
-                    val distMin = lx
-                    val distMax = sizeX - 1 - lx
-                    if (distMin <= distMax && lx > 0 && lx + 1 < sizeX) {
-                        val outIdx = idx - 1
-                        val inIdx = idx + 1
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForX(idx, ly, lz) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMinX(outIdx, lx - 1) && !openLineToMaxX(inIdx, lx + 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    if (distMax <= distMin && lx > 0 && lx + 1 < sizeX) {
-                        val outIdx = idx + 1
-                        val inIdx = idx - 1
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForX(idx, ly, lz) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMaxX(outIdx, lx + 1) && !openLineToMinX(inIdx, lx - 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
+                if (lx > 0) {
+                    val n = cur - 1
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
                 }
-
-                if (isWallFaceY && sizeY > 2) {
-                    val distMin = ly
-                    val distMax = sizeY - 1 - ly
-                    if (distMin <= distMax && ly > 0 && ly + 1 < sizeY) {
-                        val outIdx = idx - strideY
-                        val inIdx = idx + strideY
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForY(idx, lx, lz) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMinY(outIdx, ly - 1) && !openLineToMaxY(inIdx, ly + 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    if (distMax <= distMin && ly > 0 && ly + 1 < sizeY) {
-                        val outIdx = idx + strideY
-                        val inIdx = idx - strideY
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForY(idx, lx, lz) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMaxY(outIdx, ly + 1) && !openLineToMinY(inIdx, ly - 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
+                if (lx + 1 < sizeX) {
+                    val n = cur + 1
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
                 }
-
-                if (isWallFaceZ && sizeZ > 2) {
-                    val distMin = lz
-                    val distMax = sizeZ - 1 - lz
-                    if (distMin <= distMax && lz > 0 && lz + 1 < sizeZ) {
-                        val outIdx = idx - strideZ
-                        val inIdx = idx + strideZ
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForZ(idx, lx, ly) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMinZ(outIdx, lz - 1) && !openLineToMaxZ(inIdx, lz + 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    if (distMax <= distMin && lz > 0 && lz + 1 < sizeZ) {
-                        val outIdx = idx + strideZ
-                        val inIdx = idx - strideZ
-                        if (open.get(outIdx) && submerged.get(outIdx) && open.get(inIdx)) {
-                            if (lateralSolidCountForZ(idx, lx, ly) >= WALL_HOLE_MIN_LATERAL_SOLIDS) {
-                                if (openLineToMaxZ(outIdx, lz + 1) && !openLineToMinZ(inIdx, lz - 1)) {
-                                    hasSubmergedWallHole = true
-                                    wallHoleSeedIdx = idx
-                                    break
-                                }
-                            }
-                        }
-                    }
+                if (ly > 0) {
+                    val n = cur - strideY
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
+                }
+                if (ly + 1 < sizeY) {
+                    val n = cur + strideY
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
+                }
+                if (lz > 0) {
+                    val n = cur - strideZ
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
+                }
+                if (lz + 1 < sizeZ) {
+                    val n = cur + strideZ
+                    if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n)
                 }
             }
 
-            if (hasSubmergedWallHole) {
-                // Vanilla-style flood fill through submerged open cells (no air pressure restriction).
-                val waterQueue = heapIdx
-                head = 0
+            if (seedCount > 0) {
+                var waterHead = 0
                 var waterTail = 0
 
-                fun tryEnqueueWater(idx: Int) {
-                    if (!open.get(idx) || out.get(idx)) return
-                    if (!submerged.get(idx)) return
-                    out.set(idx)
-                    waterQueue[waterTail++] = idx
-                }
+                fun canFillPressurized(i: Int): Boolean {
+                    if (!open.get(i) || !interior.get(i) || out.get(i)) return false
+                    if (!submerged.get(i)) return false
+                    if (hasAirVent) return true
 
-                if (wallHoleSeedIdx >= 0) {
-                    tryEnqueueWater(wallHoleSeedIdx)
-                }
-
-                for (i in 0 until componentSize) {
-                    val idx = componentQueue[i]
-                    val lx = idx % sizeX
-                    val t = idx / sizeX
+                    val lx = i % sizeX
+                    val t = i / sizeX
                     val ly = t % sizeY
                     val lz = t / sizeY
-                    if (!isBoundary(lx, ly, lz)) continue
-                    if (!submerged.get(idx)) continue
-                    tryEnqueueWater(idx)
+                    val wy = cellCenterWorldY(lx, ly, lz)
+                    return wy <= waterLevel + planeEps
                 }
 
-                while (head < waterTail) {
-                    val idx = waterQueue[head++]
+                fun tryEnqueueWater(i: Int) {
+                    if (!canFillPressurized(i)) return
+                    out.set(i)
+                    waterQueue[waterTail++] = i
+                }
 
-                    val lx = idx % sizeX
-                    val t = idx / sizeX
+                // Seed from interior cells adjacent to submerged exterior openings.
+                for (i in 0 until seedCount) {
+                    tryEnqueueWater(waterQueue[i])
+                }
+
+                while (waterHead < waterTail) {
+                    val cur = waterQueue[waterHead++]
+
+                    val lx = cur % sizeX
+                    val t = cur / sizeX
                     val ly = t % sizeY
                     val lz = t / sizeY
 
-                    if (lx > 0) tryEnqueueWater(idx - 1)
-                    if (lx + 1 < sizeX) tryEnqueueWater(idx + 1)
-                    if (ly > 0) tryEnqueueWater(idx - strideY)
-                    if (ly + 1 < sizeY) tryEnqueueWater(idx + strideY)
-                    if (lz > 0) tryEnqueueWater(idx - strideZ)
-                    if (lz + 1 < sizeZ) tryEnqueueWater(idx + strideZ)
-                }
-
-                return@forEachBoundaryIndex
-            }
-
-            // Compute, for each cell in the component, the highest world-space Y-level L such that there exists a path
-            // from that cell to the bounds that never goes below L (a maximin "escape height").
-            //
-            // Water can only rise into a cell if the cell height is <= its escape height; otherwise filling it would
-            // require the trapped air to dip below the would-be water level.
-            for (i in 0 until componentSize) {
-                escapeHeight[componentQueue[i]] = Double.NEGATIVE_INFINITY
-            }
-            for (i in 0 until componentSize) {
-                heapPos[componentQueue[i]] = -1
-            }
-
-            var heapSize = 0
-
-            fun heapSwap(i: Int, j: Int) {
-                val a = heapIdx[i]
-                val b = heapIdx[j]
-                heapIdx[i] = b
-                heapIdx[j] = a
-                heapPos[a] = j
-                heapPos[b] = i
-            }
-
-            fun heapBubbleUp(i0: Int) {
-                var i = i0
-                while (i > 0) {
-                    val parent = (i - 1) ushr 1
-                    if (escapeHeight[heapIdx[parent]] >= escapeHeight[heapIdx[i]]) break
-                    heapSwap(i, parent)
-                    i = parent
+                    if (lx > 0) tryEnqueueWater(cur - 1)
+                    if (lx + 1 < sizeX) tryEnqueueWater(cur + 1)
+                    if (ly > 0) tryEnqueueWater(cur - strideY)
+                    if (ly + 1 < sizeY) tryEnqueueWater(cur + strideY)
+                    if (lz > 0) tryEnqueueWater(cur - strideZ)
+                    if (lz + 1 < sizeZ) tryEnqueueWater(cur + strideZ)
                 }
             }
 
-            fun heapBubbleDown(i0: Int) {
-                var i = i0
-                while (true) {
-                    val left = i * 2 + 1
-                    if (left >= heapSize) break
-                    val right = left + 1
-                    var child = left
-                    if (right < heapSize && escapeHeight[heapIdx[right]] > escapeHeight[heapIdx[left]]) {
-                        child = right
+            // Buoyancy accounting: only sealed (no air vents) submerged air contributes positively.
+            // Flooded submerged interior contributes negatively (water mass) regardless of venting.
+            if (buoyancy != null) {
+                for (i in 0 until tail) {
+                    val cellIdx = componentQueue[i]
+                    if (!submerged.get(cellIdx)) continue
+
+                    if (out.get(cellIdx)) {
+                        buoyancy.floodedVolume += 1.0
+                        continue
                     }
-                    if (escapeHeight[heapIdx[i]] >= escapeHeight[heapIdx[child]]) break
-                    heapSwap(i, child)
-                    i = child
+
+                    if (hasAirVent) continue
+                    buoyancy.sealedAirVolume += 1.0
                 }
             }
 
-            fun heapInsertOrUpdate(idx: Int) {
-                val pos = heapPos[idx]
-                if (pos >= 0) {
-                    heapBubbleUp(pos)
-                    return
-                }
-
-                heapIdx[heapSize] = idx
-                heapPos[idx] = heapSize
-                heapSize++
-                heapBubbleUp(heapSize - 1)
-            }
-
-            fun heapPopMax(): Int {
-                val resIdx = heapIdx[0]
-                heapSize--
-                if (heapSize > 0) {
-                    val lastIdx = heapIdx[heapSize]
-                    heapIdx[0] = lastIdx
-                    heapPos[lastIdx] = 0
-                    heapBubbleDown(0)
-                }
-                heapPos[resIdx] = -1
-                return resIdx
-            }
-
-            // Initialize the heap with all boundary cells in the component.
-            for (i in 0 until componentSize) {
-                val idx = componentQueue[i]
-                val lx = idx % sizeX
-                val t = idx / sizeX
-                val ly = t % sizeY
-                val lz = t / sizeY
-                if (!isBoundary(lx, ly, lz)) continue
-                val worldY = baseWorldY + incX * lx + incY * ly + incZ * lz
-                escapeHeight[idx] = worldY
-                heapInsertOrUpdate(idx)
-            }
-
-            while (heapSize > 0) {
-                val idx = heapPopMax()
-                val value = escapeHeight[idx]
-
-                val lx = idx % sizeX
-                val t = idx / sizeX
-                val ly = t % sizeY
-                val lz = t / sizeY
-                val worldY = baseWorldY + incX * lx + incY * ly + incZ * lz
-
-                fun tryRelax(nIdx: Int, nWorldY: Double) {
-                    if (!open.get(nIdx)) return
-                    val candidate = minOf(value, nWorldY)
-                    if (candidate > escapeHeight[nIdx] + AIR_PRESSURE_Y_EPS) {
-                        escapeHeight[nIdx] = candidate
-                        heapInsertOrUpdate(nIdx)
-                    }
-                }
-
-                if (lx > 0) tryRelax(idx - 1, worldY - incX)
-                if (lx + 1 < sizeX) tryRelax(idx + 1, worldY + incX)
-                if (ly > 0) tryRelax(idx - strideY, worldY - incY)
-                if (ly + 1 < sizeY) tryRelax(idx + strideY, worldY + incY)
-                if (lz > 0) tryRelax(idx - strideZ, worldY - incZ)
-                if (lz + 1 < sizeZ) tryRelax(idx + strideZ, worldY + incZ)
-            }
-
-            // Flood-fill through submerged open cells, but only into cells that are at/below their escape height.
-            val waterQueue = heapIdx
-            head = 0
-            var waterTail = 0
-
-            fun tryEnqueueWater(idx: Int, worldY: Double) {
-                if (!open.get(idx) || out.get(idx)) return
-                if (!submerged.get(idx)) return
-                // Allow one-step rise above the escape height so the inlet block itself becomes wet (e.g., a bottom hole
-                // where the outside water cell is one step lower than the first interior cell).
-                if (worldY > escapeHeight[idx] + maxStepWorldY + AIR_PRESSURE_Y_EPS) return
-                out.set(idx)
-                waterQueue[waterTail++] = idx
-            }
-
-            // Seed all boundary water contact points for this open component.
-            for (i in 0 until componentSize) {
-                val idx = componentQueue[i]
-                val lx = idx % sizeX
-                val t = idx / sizeX
-                val ly = t % sizeY
-                val lz = t / sizeY
-                if (!isBoundary(lx, ly, lz)) continue
-                if (!submerged.get(idx)) continue
-                val worldY = baseWorldY + incX * lx + incY * ly + incZ * lz
-                tryEnqueueWater(idx, worldY)
-            }
-
-            while (head < waterTail) {
-                val idx = waterQueue[head++]
-
-                val lx = idx % sizeX
-                val t = idx / sizeX
-                val ly = t % sizeY
-                val lz = t / sizeY
-                val worldY = baseWorldY + incX * lx + incY * ly + incZ * lz
-
-                if (lx > 0) tryEnqueueWater(idx - 1, worldY - incX)
-                if (lx + 1 < sizeX) tryEnqueueWater(idx + 1, worldY + incX)
-                if (ly > 0) tryEnqueueWater(idx - strideY, worldY - incY)
-                if (ly + 1 < sizeY) tryEnqueueWater(idx + strideY, worldY + incY)
-                if (lz > 0) tryEnqueueWater(idx - strideZ, worldY - incZ)
-                if (lz + 1 < sizeZ) tryEnqueueWater(idx + strideZ, worldY + incZ)
-            }
+            start = interior.nextSetBit(start + 1)
         }
 
         return out
@@ -1327,6 +1301,8 @@ object ShipWaterPocketManager {
         state: ShipPocketState,
         shipTransform: ShipTransform,
     ): BitSet {
+        val buoyancyOut = if (level.isClientSide) null else state.buoyancy
+        buoyancyOut?.reset()
         return computeWaterReachableWithPressure(
             level,
             state.minX,
@@ -1336,8 +1312,10 @@ object ShipWaterPocketManager {
             state.sizeY,
             state.sizeZ,
             state.open,
+            state.interior,
             shipTransform,
             state.waterReachable,
+            buoyancyOut = buoyancyOut,
         )
     }
 
@@ -1357,6 +1335,7 @@ object ShipWaterPocketManager {
         sizeY: Int,
         sizeZ: Int,
         open: BitSet,
+        interior: BitSet,
         shipTransform: ShipTransform,
         out: BitSet,
     ): BitSet {
@@ -1369,6 +1348,7 @@ object ShipWaterPocketManager {
             sizeY,
             sizeZ,
             open,
+            interior,
             shipTransform,
             out,
         )

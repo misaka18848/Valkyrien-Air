@@ -2,12 +2,15 @@ package org.valkyrienskies.valkyrienair.mixin.feature.ship_water_pockets;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import java.util.function.BiPredicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -35,20 +38,17 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
     @Shadow
     public abstract AABB getBoundingBox();
 
-    @org.spongepowered.asm.mixin.Unique
-    private static final FluidState vs$WATER = Fluids.WATER.defaultFluidState();
+    @Shadow
+    protected boolean wasTouchingWater;
 
     @org.spongepowered.asm.mixin.Unique
-    private static final int vs$AIR_POCKET_EXIT_DELAY_TICKS = 2;
+    private static final FluidState vs$WATER = Fluids.WATER.defaultFluidState();
 
     @org.spongepowered.asm.mixin.Unique
     private long vs$airPocketCacheTick = Long.MIN_VALUE;
 
     @org.spongepowered.asm.mixin.Unique
     private boolean vs$airPocketCacheValue = false;
-
-    @org.spongepowered.asm.mixin.Unique
-    private int vs$airPocketConsecutiveFalseTicks = 0;
 
     @Override
     public boolean vs$isInShipAirPocketForWorldWater() {
@@ -61,19 +61,7 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
             return vs$airPocketCacheValue;
         }
 
-        final boolean inAirPocketNow = vs$computeInShipAirPocketNow(lvl);
-        final boolean prev = vs$airPocketCacheValue;
-
-        final boolean value;
-        if (inAirPocketNow) {
-            vs$airPocketConsecutiveFalseTicks = 0;
-            value = true;
-        } else if (prev) {
-            vs$airPocketConsecutiveFalseTicks++;
-            value = vs$airPocketConsecutiveFalseTicks < vs$AIR_POCKET_EXIT_DELAY_TICKS;
-        } else {
-            value = false;
-        }
+        final boolean value = vs$computeInShipAirPocketNow(lvl);
 
         vs$airPocketCacheTick = now;
         vs$airPocketCacheValue = value;
@@ -128,6 +116,74 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
     }
 
     @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Lnet/minecraft/tags/TagKey;D)Z",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getFlow(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/Vec3;"
+        ),
+        require = 0
+    )
+    private Vec3 valkyrienair$rotateFlowVectorVanilla(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Vec3> getFlow) {
+        final Vec3 originalFlow = getFlow.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalFlow;
+        if (!(blockGetter instanceof final Level level)) return originalFlow;
+
+        final Vec3 rotated = ShipWaterPocketManager.computeRotatedShipFluidFlow(level, worldBlockPos);
+        return rotated != null ? rotated : originalFlow;
+    }
+
+    @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Lnet/minecraft/tags/TagKey;D)Z",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getHeight(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F"
+        ),
+        require = 0
+    )
+    private float valkyrienair$overrideFluidHeightVanilla(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Float> getHeight) {
+        final float originalHeight = getHeight.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalHeight;
+        if (!(blockGetter instanceof final Level level)) return originalHeight;
+
+        final Float shipHeight = ShipWaterPocketManager.computeShipFluidHeight(level, worldBlockPos);
+        return shipHeight != null ? shipHeight.floatValue() : originalHeight;
+    }
+
+    @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Ljava/util/function/Predicate;)V",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getFlow(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/Vec3;"
+        ),
+        require = 0
+    )
+    private Vec3 valkyrienair$rotateFlowVectorForge(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Vec3> getFlow) {
+        final Vec3 originalFlow = getFlow.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalFlow;
+        if (!(blockGetter instanceof final Level level)) return originalFlow;
+
+        final Vec3 rotated = ShipWaterPocketManager.computeRotatedShipFluidFlow(level, worldBlockPos);
+        return rotated != null ? rotated : originalFlow;
+    }
+
+    @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Ljava/util/function/Predicate;)V",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getHeight(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F"
+        ),
+        require = 0
+    )
+    private float valkyrienair$overrideFluidHeightForge(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Float> getHeight) {
+        final float originalHeight = getHeight.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalHeight;
+        if (!(blockGetter instanceof final Level level)) return originalHeight;
+
+        final Float shipHeight = ShipWaterPocketManager.computeShipFluidHeight(level, worldBlockPos);
+        return shipHeight != null ? shipHeight.floatValue() : originalHeight;
+    }
+
+    @WrapOperation(
         method = "updateFluidOnEyes",
         at = @At(value = "INVOKE",
             target = "Lnet/minecraft/world/level/Level;getFluidState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;"
@@ -137,10 +193,108 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(level, blockPos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (original.isEmpty() || !original.is(Fluids.WATER)) return original;
+        if (!original.isEmpty() && !original.is(Fluids.WATER)) return original;
 
         final double eyeY = this.getEyeY() - 0.1111111119389534;
         return ShipWaterPocketManager.overrideWaterFluidState(level, this.getX(), eyeY, this.getZ(), original);
+    }
+
+    @WrapOperation(
+        method = "updateFluidOnEyes",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;getHeight(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F"
+        ),
+        require = 0
+    )
+    private float valkyrienair$overrideUpdateFluidOnEyesFluidHeight(final FluidState fluidState, final BlockGetter blockGetter,
+        final BlockPos worldBlockPos, final Operation<Float> getHeight) {
+        final float originalHeight = getHeight.call(fluidState, blockGetter, worldBlockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return originalHeight;
+        if (!(blockGetter instanceof final Level level)) return originalHeight;
+
+        final Float shipHeight = ShipWaterPocketManager.computeShipFluidHeight(level, worldBlockPos);
+        return shipHeight != null ? shipHeight.floatValue() : originalHeight;
+    }
+
+    @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Lnet/minecraft/tags/TagKey;D)Z",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/Level;getFluidState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;"
+        ),
+        require = 0
+    )
+    private FluidState valkyrienair$overrideUpdateFluidHeightAndDoFluidPushing(final Level level, final BlockPos blockPos,
+        final Operation<FluidState> getFluidState) {
+        final FluidState original = getFluidState.call(level, blockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
+        return ShipWaterPocketManager.overrideWaterFluidState(level, blockPos, original);
+    }
+
+    @WrapOperation(
+        method = "updateFluidHeightAndDoFluidPushing(Ljava/util/function/Predicate;)V",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/Level;getFluidState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;"
+        ),
+        require = 0
+    )
+    private FluidState valkyrienair$overrideUpdateFluidHeightAndDoFluidPushingPredicate(final Level level, final BlockPos blockPos,
+        final Operation<FluidState> getFluidState) {
+        final FluidState original = getFluidState.call(level, blockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
+        return ShipWaterPocketManager.overrideWaterFluidState(level, blockPos, original);
+    }
+
+    @WrapOperation(
+        method = "updateSwimming",
+        at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/level/Level;getFluidState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;"
+        ),
+        require = 0
+    )
+    private FluidState valkyrienair$overrideUpdateSwimmingFluidCheck(final Level level, final BlockPos blockPos,
+        final Operation<FluidState> getFluidState) {
+        final FluidState original = getFluidState.call(level, blockPos);
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
+        return ShipWaterPocketManager.overrideWaterFluidState(level, blockPos, original);
+    }
+
+    @Inject(method = "updateInWaterStateAndDoWaterCurrentPushing", at = @At("HEAD"), cancellable = true, require = 0)
+    private void valkyrienair$cancelWaterCurrentPushingInShipAirPockets(final CallbackInfo ci) {
+        if (vs$isInShipAirPocketForWorldWater()) {
+            this.wasTouchingWater = false;
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "clearFire", at = @At("HEAD"), cancellable = true)
+    private void vs$preventFireExtinguishInShipAirPockets(final CallbackInfo ci) {
+        if (vs$isInShipAirPocketForWorldWater()) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "isInFluidType()Z", at = @At("RETURN"), cancellable = true, require = 0)
+    private void valkyrienair$ignoreFluidTypeFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ()) return;
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isInFluidType(Ljava/util/function/BiPredicate;Z)Z", at = @At("HEAD"), cancellable = true, require = 0)
+    private void valkyrienair$ignoreFluidTypeChecksInShipAirPockets(final BiPredicate<?, ?> predicate,
+        final boolean doAllMatch, final CallbackInfoReturnable<Boolean> cir) {
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isInFluidType(Ljava/util/function/BiPredicate;)Z", at = @At("HEAD"), cancellable = true, require = 0)
+    private void valkyrienair$ignoreFluidTypePredicateChecksInShipAirPockets(final BiPredicate<?, ?> predicate,
+        final CallbackInfoReturnable<Boolean> cir) {
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
     }
 
     @Inject(method = "doWaterSplashEffect", at = @At("HEAD"), cancellable = true)
@@ -166,6 +320,38 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
 
     @Inject(method = "isInWater", at = @At("RETURN"), cancellable = true)
     private void vs$overrideInWaterFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ()) return;
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isInWaterOrRain", at = @At("RETURN"), cancellable = true)
+    private void vs$overrideInWaterOrRainFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ()) return;
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isInWaterRainOrBubble", at = @At("RETURN"), cancellable = true)
+    private void vs$overrideInWaterRainOrBubbleFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ()) return;
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isInWaterOrBubble", at = @At("RETURN"), cancellable = true)
+    private void vs$overrideInWaterOrBubbleFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValueZ()) return;
+        if (vs$isInShipAirPocketForWorldWater()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "isUnderWater", at = @At("RETURN"), cancellable = true)
+    private void vs$overrideUnderWaterFlagInShipAirPockets(final CallbackInfoReturnable<Boolean> cir) {
         if (!cir.getReturnValueZ()) return;
         if (vs$isInShipAirPocketForWorldWater()) {
             cir.setReturnValue(false);

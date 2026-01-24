@@ -1067,6 +1067,7 @@ public final class ShipWaterPocketExternalWaterCull {
                 snapshot.getSizeY(),
                 snapshot.getSizeZ(),
                 open,
+                snapshot.getInterior(),
                 shipTransform,
                 masks.renderWaterReachable
             );
