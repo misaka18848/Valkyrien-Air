@@ -9,11 +9,11 @@ import net.minecraft.client.renderer.LevelRenderer
 import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.renderer.RenderType
 import net.minecraft.client.renderer.texture.OverlayTexture
-import net.minecraft.client.renderer.texture.TextureAtlas
 import net.minecraft.client.renderer.texture.TextureAtlasSprite
 import net.minecraft.core.BlockPos
 import net.minecraft.resources.ResourceLocation
 import net.minecraft.util.Mth
+import net.minecraft.world.inventory.InventoryMenu
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.material.Fluids
 import org.joml.Matrix4f
@@ -34,6 +34,7 @@ import kotlin.math.abs
 object ShipWaterPocketFakeWaterSurfaceRenderer {
 
     private val WATER_STILL_SPRITE_ID = ResourceLocation("minecraft", "block/water_still")
+    private val FAKE_SURFACE_RENDER_TYPE = RenderType.entityTranslucent(InventoryMenu.BLOCK_ATLAS)
 
     private data class UpDir(
         val dx: Int,
@@ -54,7 +55,7 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
 
     private val tmpShipPos = Vector3d()
     private val tmpWorldPos = Vector3d()
-    private val tmpWorldPos2 = Vector3d()
+    private val tmpCameraShipPos = Vector3d()
     private val tmpWorldBlockPos = BlockPos.MutableBlockPos()
     private val tmpWorldBlockPos2 = BlockPos.MutableBlockPos()
 
@@ -77,25 +78,43 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         if (surfaces.surfaceWaterCells.isEmpty()) return
 
         val sprite = getWaterSprite(mc) ?: return
-        val poseStack = event.poseStack
-        val pose = poseStack.last().pose()
-        val normalMat = poseStack.last().normal()
 
-        val bufferSource = MultiBufferSource.immediate(Tesselator.getInstance().builder)
-        val vc = bufferSource.getBuffer(RenderType.translucent())
+        // Render immediately using the projection/model-view matrices for this pass.
+        //
+        // MultiBufferSource flush uses RenderSystem matrices (not the chunk-layer ShaderInstance uniforms), so set them
+        // explicitly for correctness under both vanilla and Embeddium.
+        tmpWorldPos.set(event.camX, event.camY, event.camZ)
+        shipTransform.worldToShip.transformPosition(tmpWorldPos, tmpCameraShipPos)
 
-        renderSurfacesShipSpace(
-            level = level,
-            shipTransform = shipTransform,
-            sprite = sprite,
-            pose = pose,
-            normalMat = normalMat,
-            upDir = surfaces.upDir,
-            surfaceWaterCells = surfaces.surfaceWaterCells,
-            vc = vc,
-        )
+        val prevProj = Matrix4f(RenderSystem.getProjectionMatrix())
+        val modelViewStack = RenderSystem.getModelViewStack()
 
-        bufferSource.endBatch(RenderType.translucent())
+        modelViewStack.pushPose()
+        try {
+            RenderSystem.setProjectionMatrix(Matrix4f(event.projectionMatrix), VertexSorting.DISTANCE_TO_ORIGIN)
+            modelViewStack.last().pose().set(Matrix4f(event.poseStack.last().pose()))
+            RenderSystem.applyModelViewMatrix()
+
+            val bufferSource = MultiBufferSource.immediate(Tesselator.getInstance().builder)
+            val vc = bufferSource.getBuffer(FAKE_SURFACE_RENDER_TYPE)
+
+            renderSurfacesShipSpaceCameraRelative(
+                level = level,
+                shipTransform = shipTransform,
+                sprite = sprite,
+                upDir = surfaces.upDir,
+                surfaceWaterCells = surfaces.surfaceWaterCells,
+                cameraShipPos = tmpCameraShipPos,
+                vc = vc,
+            )
+
+            bufferSource.endBatch(FAKE_SURFACE_RENDER_TYPE)
+        } finally {
+            // Restore GL matrix state.
+            RenderSystem.setProjectionMatrix(prevProj, VertexSorting.DISTANCE_TO_ORIGIN)
+            modelViewStack.popPose()
+            RenderSystem.applyModelViewMatrix()
+        }
     }
 
     /**
@@ -127,9 +146,19 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
 
         val sprite = getWaterSprite(mc) ?: return
 
+        tmpWorldPos.set(getEventCamX(event) ?: return, getEventCamY(event) ?: return, getEventCamZ(event) ?: return)
+        shipTransform.worldToShip.transformPosition(tmpWorldPos, tmpCameraShipPos)
+
+        // Build the ship model-view matrix for this ship/pass. This matches the transform used by VS2's Sodium ship
+        // renderer (see SodiumCompat#vsRenderLayer).
+        val shipMv = org.joml.Matrix4d(mv)
+            .translate(-tmpWorldPos.x, -tmpWorldPos.y, -tmpWorldPos.z)
+            .mul(shipTransform.shipToWorld)
+            .translate(tmpCameraShipPos)
+
         // Render immediately using the current projection/model-view matrices for this frame.
         val bufferSource = MultiBufferSource.immediate(Tesselator.getInstance().builder)
-        val vc = bufferSource.getBuffer(RenderType.translucent())
+        val vc = bufferSource.getBuffer(FAKE_SURFACE_RENDER_TYPE)
 
         val prevProj = Matrix4f(RenderSystem.getProjectionMatrix())
         val modelViewStack = RenderSystem.getModelViewStack()
@@ -137,19 +166,20 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         modelViewStack.pushPose()
         try {
             RenderSystem.setProjectionMatrix(Matrix4f(proj), VertexSorting.DISTANCE_TO_ORIGIN)
-            modelViewStack.last().pose().set(Matrix4f(mv))
+            modelViewStack.last().pose().set(Matrix4f(shipMv))
             RenderSystem.applyModelViewMatrix()
 
-            renderSurfacesWorldSpace(
+            renderSurfacesShipSpaceCameraRelative(
                 level = level,
                 shipTransform = shipTransform,
                 sprite = sprite,
                 upDir = surfaces.upDir,
                 surfaceWaterCells = surfaces.surfaceWaterCells,
+                cameraShipPos = tmpCameraShipPos,
                 vc = vc,
             )
 
-            bufferSource.endBatch(RenderType.translucent())
+            bufferSource.endBatch(FAKE_SURFACE_RENDER_TYPE)
         } finally {
             // Restore GL matrix state.
             RenderSystem.setProjectionMatrix(prevProj, VertexSorting.DISTANCE_TO_ORIGIN)
@@ -162,7 +192,7 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         val cached = cachedWaterSprite
         if (cached != null) return cached
 
-        val atlas = mc.modelManager.getAtlas(TextureAtlas.LOCATION_BLOCKS)
+        val atlas = mc.modelManager.getAtlas(InventoryMenu.BLOCK_ATLAS)
         val sprite = atlas.getSprite(WATER_STILL_SPRITE_ID)
         cachedWaterSprite = sprite
         return sprite
@@ -313,14 +343,13 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         }
     }
 
-    private fun renderSurfacesShipSpace(
+    private fun renderSurfacesShipSpaceCameraRelative(
         level: Level,
         shipTransform: ShipTransform,
         sprite: TextureAtlasSprite,
-        pose: Matrix4f,
-        normalMat: org.joml.Matrix3f,
         upDir: UpDir,
         surfaceWaterCells: LongArray,
+        cameraShipPos: Vector3d,
         vc: com.mojang.blaze3d.vertex.VertexConsumer,
     ) {
         val u0 = sprite.u0
@@ -343,9 +372,9 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
             val light = LevelRenderer.getLightColor(level, tmpWorldBlockPos)
 
             withFaceVerticesShipSpace(upDir, x.toDouble(), y.toDouble(), z.toDouble(), shift) { x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3 ->
-                // Front face (towards air).
-                emitQuadShipSpace(
-                    vc, pose, normalMat,
+                emitQuadCameraRelativeShipSpace(
+                    vc,
+                    cameraShipPos,
                     x0, y0, z0,
                     x1, y1, z1,
                     x2, y2, z2,
@@ -355,9 +384,9 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
                     r, g, b, 0xFF,
                     light,
                 )
-                // Back face for underwater view / culling safety.
-                emitQuadShipSpace(
-                    vc, pose, normalMat,
+                emitQuadCameraRelativeShipSpace(
+                    vc,
+                    cameraShipPos,
                     x3, y3, z3,
                     x2, y2, z2,
                     x1, y1, z1,
@@ -371,126 +400,9 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         }
     }
 
-    private fun emitQuadShipSpace(
+    private fun emitQuadCameraRelativeShipSpace(
         vc: com.mojang.blaze3d.vertex.VertexConsumer,
-        pose: Matrix4f,
-        normalMat: org.joml.Matrix3f,
-        x0: Double, y0: Double, z0: Double,
-        x1: Double, y1: Double, z1: Double,
-        x2: Double, y2: Double, z2: Double,
-        x3: Double, y3: Double, z3: Double,
-        u0: Float, v0: Float, u1: Float, v1: Float,
-        nx: Float, ny: Float, nz: Float,
-        r: Int, g: Int, b: Int, a: Int,
-        light: Int,
-    ) {
-        vc.vertex(pose, x0.toFloat(), y0.toFloat(), z0.toFloat())
-            .color(r, g, b, a)
-            .uv(u0, v0)
-            .overlayCoords(OverlayTexture.NO_OVERLAY)
-            .uv2(light)
-            .normal(normalMat, nx, ny, nz)
-            .endVertex()
-        vc.vertex(pose, x1.toFloat(), y1.toFloat(), z1.toFloat())
-            .color(r, g, b, a)
-            .uv(u0, v1)
-            .overlayCoords(OverlayTexture.NO_OVERLAY)
-            .uv2(light)
-            .normal(normalMat, nx, ny, nz)
-            .endVertex()
-        vc.vertex(pose, x2.toFloat(), y2.toFloat(), z2.toFloat())
-            .color(r, g, b, a)
-            .uv(u1, v1)
-            .overlayCoords(OverlayTexture.NO_OVERLAY)
-            .uv2(light)
-            .normal(normalMat, nx, ny, nz)
-            .endVertex()
-        vc.vertex(pose, x3.toFloat(), y3.toFloat(), z3.toFloat())
-            .color(r, g, b, a)
-            .uv(u1, v0)
-            .overlayCoords(OverlayTexture.NO_OVERLAY)
-            .uv2(light)
-            .normal(normalMat, nx, ny, nz)
-            .endVertex()
-    }
-
-    private fun renderSurfacesWorldSpace(
-        level: Level,
-        shipTransform: ShipTransform,
-        sprite: TextureAtlasSprite,
-        upDir: UpDir,
-        surfaceWaterCells: LongArray,
-        vc: com.mojang.blaze3d.vertex.VertexConsumer,
-    ) {
-        val shipToWorld = shipTransform.shipToWorld
-
-        // Compute a world-space normal for the "up" face (used for both sides).
-        val worldNormal = Vector3d()
-        run {
-            tmpShipPos.set(0.0, 0.0, 0.0)
-            shipToWorld.transformPosition(tmpShipPos, tmpWorldPos)
-            val baseX = tmpWorldPos.x
-            val baseY = tmpWorldPos.y
-            val baseZ = tmpWorldPos.z
-
-            tmpShipPos.set(upDir.dx.toDouble(), upDir.dy.toDouble(), upDir.dz.toDouble())
-            shipToWorld.transformPosition(tmpShipPos, tmpWorldPos2)
-            worldNormal.set(tmpWorldPos2.x - baseX, tmpWorldPos2.y - baseY, tmpWorldPos2.z - baseZ)
-            val len = worldNormal.length()
-            if (len > 1e-12) worldNormal.div(len) else worldNormal.set(0.0, 1.0, 0.0)
-        }
-
-        val u0 = sprite.u0
-        val u1 = sprite.u1
-        val v0 = sprite.v0
-        val v1 = sprite.v1
-
-        for (packedPos in surfaceWaterCells) {
-            val x = BlockPos.getX(packedPos)
-            val y = BlockPos.getY(packedPos)
-            val z = BlockPos.getZ(packedPos)
-
-            val shift = computeClampShiftShipUnits(level, shipTransform, upDir, x, y, z)
-
-            val color = BiomeColors.getAverageWaterColor(level, tmpWorldBlockPos)
-            val r = (color shr 16) and 0xFF
-            val g = (color shr 8) and 0xFF
-            val b = color and 0xFF
-
-            val light = LevelRenderer.getLightColor(level, tmpWorldBlockPos)
-
-            withFaceVerticesShipSpace(upDir, x.toDouble(), y.toDouble(), z.toDouble(), shift) { x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3 ->
-                emitQuadWorldSpace(
-                    vc,
-                    shipToWorld,
-                    x0, y0, z0,
-                    x1, y1, z1,
-                    x2, y2, z2,
-                    x3, y3, z3,
-                    u0, v0, u1, v1,
-                    worldNormal.x.toFloat(), worldNormal.y.toFloat(), worldNormal.z.toFloat(),
-                    r, g, b, 0xFF,
-                    light,
-                )
-                emitQuadWorldSpace(
-                    vc,
-                    shipToWorld,
-                    x3, y3, z3,
-                    x2, y2, z2,
-                    x1, y1, z1,
-                    x0, y0, z0,
-                    u0, v0, u1, v1,
-                    (-worldNormal.x).toFloat(), (-worldNormal.y).toFloat(), (-worldNormal.z).toFloat(),
-                    r, g, b, 0xFF,
-                    light,
-                )
-            }
-        }
-    }
-
-    private fun emitQuadWorldSpace(
-        vc: com.mojang.blaze3d.vertex.VertexConsumer,
-        shipToWorld: org.joml.Matrix4dc,
+        cameraShipPos: Vector3d,
         sx0: Double, sy0: Double, sz0: Double,
         sx1: Double, sy1: Double, sz1: Double,
         sx2: Double, sy2: Double, sz2: Double,
@@ -501,9 +413,7 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         light: Int,
     ) {
         fun v(sx: Double, sy: Double, sz: Double, u: Float, v: Float) {
-            tmpShipPos.set(sx, sy, sz)
-            shipToWorld.transformPosition(tmpShipPos, tmpWorldPos)
-            vc.vertex(tmpWorldPos.x, tmpWorldPos.y, tmpWorldPos.z)
+            vc.vertex(sx - cameraShipPos.x, sy - cameraShipPos.y, sz - cameraShipPos.z)
                 .color(r, g, b, a)
                 .uv(u, v)
                 .overlayCoords(OverlayTexture.NO_OVERLAY)
@@ -637,6 +547,24 @@ object ShipWaterPocketFakeWaterSurfaceRenderer {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    private fun getEventCamX(event: Any): Double? = try {
+        event.javaClass.getMethod("getCamX").invoke(event) as? Double
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun getEventCamY(event: Any): Double? = try {
+        event.javaClass.getMethod("getCamY").invoke(event) as? Double
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun getEventCamZ(event: Any): Double? = try {
+        event.javaClass.getMethod("getCamZ").invoke(event) as? Double
+    } catch (_: Throwable) {
+        null
     }
 
     private fun getEventMatrices(event: Any): Any? {
