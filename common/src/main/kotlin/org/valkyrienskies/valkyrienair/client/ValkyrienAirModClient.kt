@@ -1,6 +1,7 @@
 package org.valkyrienskies.valkyrienair.client
 
 import org.valkyrienskies.mod.common.hooks.VSGameEvents
+import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketFakeWaterSurfaceRenderer
 import org.valkyrienskies.valkyrienair.client.feature.ship_water_pockets.ShipWaterPocketExternalWaterCullRenderContext
 
 /**
@@ -13,6 +14,7 @@ object ValkyrienAirModClient {
             ShipWaterPocketExternalWaterCullRenderContext.beginShipRender()
         }
         VSGameEvents.postRenderShip.on {
+            ShipWaterPocketFakeWaterSurfaceRenderer.onRenderShip(it)
             ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
         }
 
@@ -20,6 +22,7 @@ object ValkyrienAirModClient {
             ShipWaterPocketExternalWaterCullRenderContext.beginShipRender()
         }
         VSGameEvents.postRenderShipSodium.on {
+            ShipWaterPocketFakeWaterSurfaceRenderer.onPostRenderShipSodium(it as Any)
             ShipWaterPocketExternalWaterCullRenderContext.endShipRender()
         }
     }
