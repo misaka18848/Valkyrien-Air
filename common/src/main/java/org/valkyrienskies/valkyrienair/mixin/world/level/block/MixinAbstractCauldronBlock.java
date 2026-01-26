@@ -79,17 +79,20 @@ public abstract class MixinAbstractCauldronBlock {
         final double eps = 1.0e-7;
         final int blockX = pos.getX();
         final int blockZ = pos.getZ();
-        if (shipMaxX <= blockX + eps || shipMinX >= blockX + 1.0 - eps || shipMaxZ <= blockZ + eps ||
-            shipMinZ >= blockZ + 1.0 - eps) {
+        final double wx = entity.getX();
+        final double wy = entity.getY();
+        final double wz = entity.getZ();
+        final double shipEntityX = worldToShip.m00() * wx + worldToShip.m10() * wy + worldToShip.m20() * wz + worldToShip.m30();
+        final double shipEntityY = worldToShip.m01() * wx + worldToShip.m11() * wy + worldToShip.m21() * wz + worldToShip.m31();
+        final double shipEntityZ = worldToShip.m02() * wx + worldToShip.m12() * wy + worldToShip.m22() * wz + worldToShip.m32();
+
+        // Use entity position (not ship-space AABB) to avoid false positives from rotated AABB expansion.
+        if (shipEntityX <= blockX + eps || shipEntityX >= blockX + 1.0 - eps || shipEntityZ <= blockZ + eps ||
+            shipEntityZ >= blockZ + 1.0 - eps) {
             cir.setReturnValue(false);
             cir.cancel();
             return;
         }
-
-        final double wx = entity.getX();
-        final double wy = entity.getY();
-        final double wz = entity.getZ();
-        final double shipEntityY = worldToShip.m01() * wx + worldToShip.m11() * wy + worldToShip.m21() * wz + worldToShip.m31();
 
         final double contentTopY = pos.getY() + this.getContentHeight(state);
         final boolean inside = shipEntityY < contentTopY && shipMaxY > pos.getY() + 0.25;
