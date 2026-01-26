@@ -4,10 +4,10 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.client.Camera;
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.FluidState;
-import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -32,7 +32,7 @@ public abstract class MixinCamera {
         final FluidState original = getFluidState.call(instance, blockPos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
         if (!(instance instanceof final Level level)) return original;
-        if (!original.isEmpty() && !original.is(Fluids.WATER)) return original;
+        if (!original.isEmpty() && !original.is(FluidTags.WATER)) return original;
 
         final Vec3 pos = this.getPosition();
         return ShipWaterPocketManager.overrideWaterFluidState(level, pos.x, pos.y, pos.z, original);

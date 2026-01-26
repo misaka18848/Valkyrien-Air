@@ -86,7 +86,14 @@ public abstract class MixinBuoyancyHandlerAttachment implements ValkyrienAirBuoy
         // Disable VS2's experimental pocket buoyancy and apply Valkyrien-Air's own buoyancy forces instead.
         ci.cancel();
 
-        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return;
+        // Also disable VS2's built-in buoyancy forces. Valkyrien-Air models buoyancy based on displaced water volume
+        // (submerged interior air that hasn't flooded), rather than relying on VS2's experimental buoyancy behavior.
+        if (ValkyrienAirConfig.getEnableShipWaterPockets()) {
+            physShip.setBuoyantFactor(0.0);
+        } else {
+            return;
+        }
+
         if (!valkyrienair$hasPocketCenter) return;
 
         final double displaced = valkyrienair$displacedVolume;

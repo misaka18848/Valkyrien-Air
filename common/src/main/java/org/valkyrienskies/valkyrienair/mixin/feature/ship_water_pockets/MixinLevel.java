@@ -1,9 +1,11 @@
 package org.valkyrienskies.valkyrienair.mixin.feature.ship_water_pockets;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -65,7 +67,7 @@ public abstract class MixinLevel {
         if (!VSGameUtilsKt.isBlockInShipyard(level, pos)) return;
 
         final var fluidState = state.getFluidState();
-        if (fluidState.isEmpty() || !fluidState.is(Fluids.WATER)) return;
+        if (fluidState.isEmpty() || !fluidState.is(FluidTags.WATER)) return;
 
         final Ship ship = VSGameUtilsKt.getShipManagingPos(level, pos);
         if (ship == null) return;
@@ -92,5 +94,47 @@ public abstract class MixinLevel {
         if (ship == null) return;
 
         ShipWaterPocketManager.markShipDirty(level, ship.getId());
+    }
+
+    @Inject(
+        method = "getFluidState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;",
+        at = @At("RETURN"),
+        cancellable = true
+    )
+    private void valkyrienair$overrideFluidStateForModCompat(final BlockPos pos,
+        final CallbackInfoReturnable<FluidState> cir) {
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return;
+
+        final Level level = Level.class.cast(this);
+        if (ShipWaterPocketManager.isBypassingFluidOverrides()) return;
+
+        final FluidState original = cir.getReturnValue();
+        final FluidState overridden = ShipWaterPocketManager.overrideWaterFluidState(level, pos, original);
+        if (overridden != original) {
+            cir.setReturnValue(overridden);
+        }
+    }
+
+    @Inject(
+        method = "getBlockState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+        at = @At("RETURN"),
+        cancellable = true
+    )
+    private void valkyrienair$overrideBlockStateForModCompat(final BlockPos pos,
+        final CallbackInfoReturnable<BlockState> cir) {
+        if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return;
+
+        final Level level = Level.class.cast(this);
+        if (ShipWaterPocketManager.isBypassingFluidOverrides()) return;
+        if (VSGameUtilsKt.isBlockInShipyard(level, pos)) return;
+
+        final BlockState original = cir.getReturnValue();
+        if (!original.is(Blocks.WATER)) return;
+        final FluidState originalFluid = original.getFluidState();
+        if (originalFluid.isEmpty() || !originalFluid.is(FluidTags.WATER)) return;
+
+        if (ShipWaterPocketManager.isWorldPosInShipAirPocket(level, pos)) {
+            cir.setReturnValue(Blocks.AIR.defaultBlockState());
+        }
     }
 }

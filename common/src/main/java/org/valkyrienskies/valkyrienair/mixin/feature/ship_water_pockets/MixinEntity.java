@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import java.util.function.BiPredicate;
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.BlockGetter;
@@ -119,8 +120,7 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
 
     @org.spongepowered.asm.mixin.Unique
     private static boolean vs$isAirPocketAtPoint(final Level level, final double x, final double y, final double z) {
-        final FluidState overridden = ShipWaterPocketManager.overrideWaterFluidState(level, x, y, z, vs$WATER);
-        return overridden.isEmpty();
+        return ShipWaterPocketManager.isWorldPosInShipAirPocket(level, BlockPos.containing(x, y, z));
     }
 
     @org.spongepowered.asm.mixin.Unique
@@ -153,6 +153,25 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
     private static boolean vs$isShipFluidAtPoint(final Level level, final double x, final double y, final double z) {
         final FluidState overridden = ShipWaterPocketManager.overrideWaterFluidState(level, x, y, z, vs$EMPTY);
         return !overridden.isEmpty();
+    }
+
+    @WrapOperation(
+        method = "move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/entity/Entity;setRemainingFireTicks(I)V",
+            ordinal = 1
+        ),
+        require = 0
+    )
+    private void valkyrienair$preventWaterExtinguishInShipAirPockets(final Entity entity, final int fireTicks,
+        final Operation<Void> setRemainingFireTicks) {
+        if (vs$isInShipAirPocketForWorldWater()) {
+            // Vanilla extinguishes entities in water/powder snow here. Inside ship air pockets, "water" is only world
+            // water that should be treated as air, so don't reset fire ticks.
+            return;
+        }
+        setRemainingFireTicks.call(entity, fireTicks);
     }
 
     @WrapOperation(
@@ -233,7 +252,7 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(level, blockPos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (!original.isEmpty() && !original.is(Fluids.WATER)) return original;
+        if (!original.isEmpty() && !original.is(FluidTags.WATER)) return original;
 
         final double eyeY = this.getEyeY() - 0.1111111119389534;
         return ShipWaterPocketManager.overrideWaterFluidState(level, this.getX(), eyeY, this.getZ(), original);

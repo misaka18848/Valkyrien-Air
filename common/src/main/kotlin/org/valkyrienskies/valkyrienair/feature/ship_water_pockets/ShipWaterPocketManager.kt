@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.ints.Int2DoubleOpenHashMap
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import net.minecraft.core.BlockPos
 import net.minecraft.core.particles.ParticleTypes
+import net.minecraft.tags.FluidTags
 import net.minecraft.world.phys.AABB
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.util.Mth
@@ -59,6 +60,8 @@ object ShipWaterPocketManager {
 
     @Volatile
     private var applyingInternalUpdates: Boolean = false
+
+    private val bypassFluidOverridesDepth: ThreadLocal<IntArray> = ThreadLocal.withInitial { intArrayOf(0) }
 
     private data class ShipPocketState(
         var minX: Int = 0,
@@ -131,6 +134,19 @@ object ShipWaterPocketManager {
 
     @JvmStatic
     fun isApplyingInternalUpdates(): Boolean = applyingInternalUpdates
+
+    @JvmStatic
+    fun isBypassingFluidOverrides(): Boolean = bypassFluidOverridesDepth.get()[0] > 0
+
+    private inline fun <T> withBypassedFluidOverrides(block: () -> T): T {
+        val depth = bypassFluidOverridesDepth.get()
+        depth[0]++
+        try {
+            return block()
+        } finally {
+            depth[0]--
+        }
+    }
 
     @JvmStatic
     fun markShipDirty(level: Level, shipId: Long) {
@@ -651,7 +667,7 @@ object ShipWaterPocketManager {
     fun overrideWaterFluidState(level: Level, worldBlockPos: BlockPos, original: net.minecraft.world.level.material.FluidState): net.minecraft.world.level.material.FluidState {
         if (!ValkyrienAirConfig.enableShipWaterPockets) return original
         if (level.isBlockInShipyard(worldBlockPos)) return original
-        if (!original.isEmpty && !original.`is`(Fluids.WATER)) return original
+        if (!original.isEmpty && !original.`is`(FluidTags.WATER)) return original
 
         val queryAabb = tmpQueryAabb.get().apply {
             minX = worldBlockPos.x.toDouble()
@@ -681,14 +697,23 @@ object ShipWaterPocketManager {
                 shipBlockPosTmp.set(openPos)
             }
 
+            val baseX = shipBlockPosTmp.x
+            val baseY = shipBlockPosTmp.y
+            val baseZ = shipBlockPosTmp.z
+
+            val inAirPocket = if (!original.isEmpty && original.`is`(FluidTags.WATER)) {
+                findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
+            } else {
+                false
+            }
+            shipBlockPosTmp.set(baseX, baseY, baseZ)
+
             val shipFluid = level.getBlockState(shipBlockPosTmp).fluidState
             if (!shipFluid.isEmpty) return shipFluid
 
-            if (!original.isEmpty && original.`is`(Fluids.WATER)) {
-                // We are inside a ship air pocket; treat world water as air.
-                if (isAirPocket(state, shipBlockPosTmp)) {
-                    return shipFluid
-                }
+            if (inAirPocket) {
+                // We are inside a sealed ship air pocket; treat world water as air.
+                return shipFluid
             }
         }
 
@@ -705,7 +730,7 @@ object ShipWaterPocketManager {
     ): net.minecraft.world.level.material.FluidState {
         if (!ValkyrienAirConfig.enableShipWaterPockets) return original
         if (level.isBlockInShipyard(worldX, worldY, worldZ)) return original
-        if (!original.isEmpty && !original.`is`(Fluids.WATER)) return original
+        if (!original.isEmpty && !original.`is`(FluidTags.WATER)) return original
 
         val worldBlockPos = BlockPos.containing(worldX, worldY, worldZ)
         val queryAabb = tmpQueryAabb.get().apply {
@@ -732,14 +757,23 @@ object ShipWaterPocketManager {
                 shipBlockPosTmp.set(openPos)
             }
 
+            val baseX = shipBlockPosTmp.x
+            val baseY = shipBlockPosTmp.y
+            val baseZ = shipBlockPosTmp.z
+
+            val inAirPocket = if (!original.isEmpty && original.`is`(FluidTags.WATER)) {
+                findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
+            } else {
+                false
+            }
+            shipBlockPosTmp.set(baseX, baseY, baseZ)
+
             val shipFluid = level.getBlockState(shipBlockPosTmp).fluidState
             if (!shipFluid.isEmpty) return shipFluid
 
-            if (!original.isEmpty && original.`is`(Fluids.WATER)) {
-                // We are inside a ship air pocket; treat world water as air.
-                if (isAirPocket(state, shipBlockPosTmp)) {
-                    return shipFluid
-                }
+            if (inAirPocket) {
+                // We are inside a sealed ship air pocket; treat world water as air.
+                return shipFluid
             }
         }
 
@@ -1246,7 +1280,7 @@ object ShipWaterPocketManager {
                     }
 
                     val fluidState = bs.fluidState
-                    if (!fluidState.isEmpty && fluidState.`is`(Fluids.WATER)) {
+                    if (!fluidState.isEmpty && fluidState.`is`(FluidTags.WATER)) {
                         flooded.set(idx)
                         if (bs.block == Blocks.WATER) {
                             materialized.set(idx)
@@ -2103,60 +2137,62 @@ object ShipWaterPocketManager {
         worldPosTmp: Vector3d,
         worldBlockPos: BlockPos.MutableBlockPos,
     ): Boolean {
-        val epsCorner = 1e-4
-        val epsY = 1e-5
+        return withBypassedFluidOverrides {
+            val epsCorner = 1e-4
+            val epsY = 1e-5
 
-        fun sample(shipX: Double, shipY: Double, shipZ: Double): Boolean {
-            shipPosTmp.set(shipX, shipY, shipZ)
+            fun sample(shipX: Double, shipY: Double, shipZ: Double): Boolean {
+                shipPosTmp.set(shipX, shipY, shipZ)
+                shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+
+                val wx = Mth.floor(worldPosTmp.x)
+                val wy = Mth.floor(worldPosTmp.y)
+                val wz = Mth.floor(worldPosTmp.z)
+                worldBlockPos.set(wx, wy, wz)
+
+                val worldFluid = level.getFluidState(worldBlockPos)
+                if (worldFluid.isEmpty || !worldFluid.`is`(FluidTags.WATER)) return false
+                if (worldFluid.isSource) return true
+
+                val height = worldFluid.getHeight(level, worldBlockPos).toDouble()
+                val localY = worldPosTmp.y - wy.toDouble()
+                return localY <= height + epsY
+            }
+
+            val x0 = shipBlockPos.x.toDouble()
+            val y0 = shipBlockPos.y.toDouble()
+            val z0 = shipBlockPos.z.toDouble()
+
+            // Fast path: check the cell center first.
+            shipPosTmp.set(x0 + 0.5, y0 + 0.5, z0 + 0.5)
             shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+            val centerWx = Mth.floor(worldPosTmp.x)
+            val centerWy = Mth.floor(worldPosTmp.y)
+            val centerWz = Mth.floor(worldPosTmp.z)
+            worldBlockPos.set(centerWx, centerWy, centerWz)
+            val centerFluid = level.getFluidState(worldBlockPos)
 
-            val wx = Mth.floor(worldPosTmp.x)
-            val wy = Mth.floor(worldPosTmp.y)
-            val wz = Mth.floor(worldPosTmp.z)
-            worldBlockPos.set(wx, wy, wz)
+            if (!centerFluid.isEmpty && centerFluid.`is`(FluidTags.WATER)) {
+                if (centerFluid.isSource) return@withBypassedFluidOverrides true
+                val height = centerFluid.getHeight(level, worldBlockPos).toDouble()
+                val localY = worldPosTmp.y - centerWy.toDouble()
+                if (localY <= height + epsY) return@withBypassedFluidOverrides true
+            }
 
-            val worldFluid = level.getFluidState(worldBlockPos)
-            if (worldFluid.isEmpty || !worldFluid.`is`(Fluids.WATER)) return false
-            if (worldFluid.isSource) return true
+            // Near the waterline / with rotation, the cell center can be above water while a corner is submerged.
+            val lo = epsCorner
+            val hi = 1.0 - epsCorner
+            if (sample(x0 + lo, y0 + lo, z0 + lo)) return@withBypassedFluidOverrides true
+            if (sample(x0 + hi, y0 + lo, z0 + lo)) return@withBypassedFluidOverrides true
+            if (sample(x0 + lo, y0 + hi, z0 + lo)) return@withBypassedFluidOverrides true
+            if (sample(x0 + hi, y0 + hi, z0 + lo)) return@withBypassedFluidOverrides true
+            if (sample(x0 + lo, y0 + lo, z0 + hi)) return@withBypassedFluidOverrides true
+            if (sample(x0 + hi, y0 + lo, z0 + hi)) return@withBypassedFluidOverrides true
+            if (sample(x0 + lo, y0 + hi, z0 + hi)) return@withBypassedFluidOverrides true
+            if (sample(x0 + hi, y0 + hi, z0 + hi)) return@withBypassedFluidOverrides true
 
-            val height = worldFluid.getHeight(level, worldBlockPos).toDouble()
-            val localY = worldPosTmp.y - wy.toDouble()
-            return localY <= height + epsY
+            return@withBypassedFluidOverrides false
         }
-
-        val x0 = shipBlockPos.x.toDouble()
-        val y0 = shipBlockPos.y.toDouble()
-        val z0 = shipBlockPos.z.toDouble()
-
-        // Fast path: check the cell center first.
-        shipPosTmp.set(x0 + 0.5, y0 + 0.5, z0 + 0.5)
-        shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
-        val centerWx = Mth.floor(worldPosTmp.x)
-        val centerWy = Mth.floor(worldPosTmp.y)
-        val centerWz = Mth.floor(worldPosTmp.z)
-        worldBlockPos.set(centerWx, centerWy, centerWz)
-        val centerFluid = level.getFluidState(worldBlockPos)
-
-        if (!centerFluid.isEmpty && centerFluid.`is`(Fluids.WATER)) {
-            if (centerFluid.isSource) return true
-            val height = centerFluid.getHeight(level, worldBlockPos).toDouble()
-            val localY = worldPosTmp.y - centerWy.toDouble()
-            if (localY <= height + epsY) return true
-        }
-
-        // Near the waterline / with rotation, the cell center can be above water while a corner is submerged.
-        val lo = epsCorner
-        val hi = 1.0 - epsCorner
-        if (sample(x0 + lo, y0 + lo, z0 + lo)) return true
-        if (sample(x0 + hi, y0 + lo, z0 + lo)) return true
-        if (sample(x0 + lo, y0 + hi, z0 + lo)) return true
-        if (sample(x0 + hi, y0 + hi, z0 + lo)) return true
-        if (sample(x0 + lo, y0 + lo, z0 + hi)) return true
-        if (sample(x0 + hi, y0 + lo, z0 + hi)) return true
-        if (sample(x0 + lo, y0 + hi, z0 + hi)) return true
-        if (sample(x0 + hi, y0 + hi, z0 + hi)) return true
-
-        return false
     }
 
     private fun floodFillFromBoundary(open: BitSet, sizeX: Int, sizeY: Int, sizeZ: Int): BitSet {
@@ -2258,13 +2294,15 @@ object ShipWaterPocketManager {
         val shipBlockPos = BlockPos.MutableBlockPos()
 
         fun shipCellInWorldWater(idx: Int): Boolean {
-            posFromIndex(state, idx, shipBlockPos)
+            return withBypassedFluidOverrides {
+                posFromIndex(state, idx, shipBlockPos)
 
-            shipPosTmp.set(shipBlockPos.x + 0.5, shipBlockPos.y + 0.5, shipBlockPos.z + 0.5)
-            shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
+                shipPosTmp.set(shipBlockPos.x + 0.5, shipBlockPos.y + 0.5, shipBlockPos.z + 0.5)
+                shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
 
-            val worldBlockPos = BlockPos.containing(worldPosTmp.x, worldPosTmp.y, worldPosTmp.z)
-            return level.getFluidState(worldBlockPos).`is`(Fluids.WATER)
+                val worldBlockPos = BlockPos.containing(worldPosTmp.x, worldPosTmp.y, worldPosTmp.z)
+                return@withBypassedFluidOverrides level.getFluidState(worldBlockPos).`is`(FluidTags.WATER)
+            }
         }
 
         fun tryEnqueue(idx: Int) {

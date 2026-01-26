@@ -1,6 +1,7 @@
 {
   "required": true,
   "package": "org.valkyrienskies.valkyrienair.mixin",
+  "plugin": "org.valkyrienskies.valkyrienair.mixin.ValkyrienAirMixinPlugin",
   "compatibilityLevel": "JAVA_17",
   "minVersion": "0.8",
   "client": [
@@ -12,12 +13,16 @@
     "feature.ship_water_pockets.MixinClientPacketListener"
   ],
   "mixins": [
+    "compat.create.MixinFanProcessingTypes",
+    "compat.itemphysic.MixinCommonPhysic",
+    "compat.itemphysic.MixinItemPhysicServer",
     "compat.vs2.MixinBuoyancyHandlerAttachment",
     "compat.vs2.MixinVSGameUtilsKt",
     "feature.ship_water_pockets.MixinEntity",
     "feature.ship_water_pockets.MixinLevel",
     "feature.ship_water_pockets.MixinLevelReader",
     "server.MixinMinecraftServer",
+    "world.level.block.MixinAbstractCauldronBlock",
     "world.level.block.MixinBaseFireBlock",
     "world.level.block.MixinFarmBlock"
   ],
