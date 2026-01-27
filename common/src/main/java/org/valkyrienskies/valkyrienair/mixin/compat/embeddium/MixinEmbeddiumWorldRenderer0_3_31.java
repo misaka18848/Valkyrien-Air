@@ -23,13 +23,14 @@ public abstract class MixinEmbeddiumWorldRenderer0_3_31 {
     )
     private void valkyrienair$beginWorldTranslucentChunkLayer(final RenderType renderLayer, final Matrix4f normal,
         final double x, final double y, final double z, final CallbackInfo ci) {
-        if (renderLayer != RenderType.translucent()) return;
+        if (!ShipWaterPocketExternalWaterCullRenderContext.isFluidChunkLayer(renderLayer)) return;
         final ClientLevel level = Minecraft.getInstance().level;
         if (level == null) return;
 
         EmbeddiumChunkRenderContext.pushChunkCameraWorldPos(x, y, z);
-        ShipWaterPocketExternalWaterCullRenderContext.beginWorldTranslucentChunkLayer(
+        ShipWaterPocketExternalWaterCullRenderContext.beginWorldFluidChunkLayer(
             level,
+            renderLayer,
             EmbeddiumChunkRenderContext.getChunkCamXOr(x),
             EmbeddiumChunkRenderContext.getChunkCamYOr(y),
             EmbeddiumChunkRenderContext.getChunkCamZOr(z)
@@ -43,8 +44,8 @@ public abstract class MixinEmbeddiumWorldRenderer0_3_31 {
     )
     private void valkyrienair$endWorldTranslucentChunkLayer(final RenderType renderLayer, final Matrix4f normal,
         final double x, final double y, final double z, final CallbackInfo ci) {
-        if (renderLayer != RenderType.translucent()) return;
-        ShipWaterPocketExternalWaterCullRenderContext.endWorldTranslucentChunkLayer();
+        if (!ShipWaterPocketExternalWaterCullRenderContext.isFluidChunkLayer(renderLayer)) return;
+        ShipWaterPocketExternalWaterCullRenderContext.endWorldFluidChunkLayer();
         EmbeddiumChunkRenderContext.pop();
     }
 }

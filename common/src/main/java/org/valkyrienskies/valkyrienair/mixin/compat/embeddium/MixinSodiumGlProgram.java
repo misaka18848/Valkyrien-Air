@@ -31,7 +31,7 @@ public abstract class MixinSodiumGlProgram {
         final boolean shipTintActive = ShipWaterPocketShipWaterTintRenderContext.isActive();
         final int shipTintRgb = shipTintActive ? ShipWaterPocketShipWaterTintRenderContext.getTintRgb() : 0xFFFFFF;
 
-        if (ShipWaterPocketExternalWaterCullRenderContext.isInWorldTranslucentChunkLayer()) {
+        if (ShipWaterPocketExternalWaterCullRenderContext.isInWorldFluidChunkLayer()) {
             final ClientLevel level = ShipWaterPocketExternalWaterCullRenderContext.getLevel();
             if (level != null) {
                 // IMPORTANT: VS2's Sodium/Embeddium ship renderer uses the same chunk shader program but feeds it

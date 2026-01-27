@@ -33,7 +33,7 @@ public abstract class MixinShaderInstance {
         final boolean shipTintActive = ShipWaterPocketShipWaterTintRenderContext.isActive();
         final int shipTintRgb = shipTintActive ? ShipWaterPocketShipWaterTintRenderContext.getTintRgb() : 0xFFFFFF;
 
-        if (ShipWaterPocketExternalWaterCullRenderContext.isInWorldTranslucentChunkLayer()) {
+        if (ShipWaterPocketExternalWaterCullRenderContext.isInWorldFluidChunkLayer()) {
             final var level = ShipWaterPocketExternalWaterCullRenderContext.getLevel();
             if (level != null) {
                 ShipWaterPocketExternalWaterCull.setupForWorldTranslucentPass(shader, level,
@@ -47,7 +47,7 @@ public abstract class MixinShaderInstance {
             }
         }
 
-        // Ensure we don't affect other uses of the translucent shader outside the world chunk translucent pass,
+        // Ensure we don't affect other uses of patched chunk shaders outside the world fluid chunk pass,
         // but still apply dynamic ship water tint during vanilla ship rendering (which is outside the world chunk pass).
         ShipWaterPocketExternalWaterCull.disable(shader);
         if (shipTintActive) {

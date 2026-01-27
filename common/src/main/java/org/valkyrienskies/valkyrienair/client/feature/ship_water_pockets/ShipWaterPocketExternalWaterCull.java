@@ -8,6 +8,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
@@ -15,6 +16,7 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +28,7 @@ import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.InventoryMenu;
@@ -34,7 +37,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.FlowingFluid;
-import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.apache.logging.log4j.LogManager;
@@ -90,55 +92,13 @@ public final class ShipWaterPocketExternalWaterCull {
     private static final ResourceLocation LAVA_STILL = new ResourceLocation("minecraft", "block/lava_still");
     private static final ResourceLocation LAVA_FLOW = new ResourceLocation("minecraft", "block/lava_flow");
 
-    private static final float INVALID_U0 = 1.0f;
-    private static final float INVALID_V0 = 1.0f;
-    private static final float INVALID_U1 = 0.0f;
-    private static final float INVALID_V1 = 0.0f;
-
-    private static final class CullFluidUvBounds {
-        private final float stillU0;
-        private final float stillV0;
-        private final float stillU1;
-        private final float stillV1;
-        private final float flowU0;
-        private final float flowV0;
-        private final float flowU1;
-        private final float flowV1;
-        private final float overlayU0;
-        private final float overlayV0;
-        private final float overlayU1;
-        private final float overlayV1;
-
-        private CullFluidUvBounds(
-            final float stillU0, final float stillV0, final float stillU1, final float stillV1,
-            final float flowU0, final float flowV0, final float flowU1, final float flowV1,
-            final float overlayU0, final float overlayV0, final float overlayU1, final float overlayV1
-        ) {
-            this.stillU0 = stillU0;
-            this.stillV0 = stillV0;
-            this.stillU1 = stillU1;
-            this.stillV1 = stillV1;
-            this.flowU0 = flowU0;
-            this.flowV0 = flowV0;
-            this.flowU1 = flowU1;
-            this.flowV1 = flowV1;
-            this.overlayU0 = overlayU0;
-            this.overlayV0 = overlayV0;
-            this.overlayU1 = overlayU1;
-            this.overlayV1 = overlayV1;
-        }
-    }
-
-    private static final CullFluidUvBounds INVALID_CULL_FLUID_UVS =
-        new CullFluidUvBounds(
-            INVALID_U0, INVALID_V0, INVALID_U1, INVALID_V1,
-            INVALID_U0, INVALID_V0, INVALID_U1, INVALID_V1,
-            INVALID_U0, INVALID_V0, INVALID_U1, INVALID_V1
-        );
-
-    private static final Map<Fluid, CullFluidUvBounds> CULL_FLUID_UV_CACHE = new HashMap<>();
-    private static int cullFluidUvLastAtlasTexId = 0;
-    private static boolean loggedCullFluidUvLookupFailed = false;
+    private static int fluidMaskTexId = 0;
+    private static int fluidMaskWidth = 0;
+    private static int fluidMaskHeight = 0;
+    private static int fluidMaskLastAtlasTexId = 0;
+    private static byte[] fluidMaskData = null;
+    private static ByteBuffer fluidMaskBuffer = null;
+    private static boolean loggedFluidMaskBuildFailed = false;
 
     private static boolean forgeFluidTexturesChecked = false;
     private static Method forgeFluidExtOf = null;
@@ -216,6 +176,7 @@ public final class ShipWaterPocketExternalWaterCull {
         private int waterStillUvLoc = -1;
         private int waterFlowUvLoc = -1;
         private int waterOverlayUvLoc = -1;
+        private int fluidMaskLoc = -1;
         private int shipWaterTintEnabledLoc = -1;
         private int shipWaterTintLoc = -1;
         private int chunkWorldOriginLoc = -1;
@@ -228,9 +189,6 @@ public final class ShipWaterPocketExternalWaterCull {
         private final int[] cameraShipPosLoc = new int[MAX_SHIPS];
         private final int[] gridMinLoc = new int[MAX_SHIPS];
         private final int[] gridSizeLoc = new int[MAX_SHIPS];
-        private final int[] cullFluidStillUvLoc = new int[MAX_SHIPS];
-        private final int[] cullFluidFlowUvLoc = new int[MAX_SHIPS];
-        private final int[] cullFluidOverlayUvLoc = new int[MAX_SHIPS];
         private final int[] worldToShipLoc = new int[MAX_SHIPS];
         private final int[] airMaskLoc = new int[MAX_SHIPS];
         private final int[] occMaskLoc = new int[MAX_SHIPS];
@@ -263,9 +221,6 @@ public final class ShipWaterPocketExternalWaterCull {
         private final Uniform[] cameraShipPos = new Uniform[MAX_SHIPS];
         private final Uniform[] gridMin = new Uniform[MAX_SHIPS];
         private final Uniform[] gridSize = new Uniform[MAX_SHIPS];
-        private final Uniform[] cullFluidStillUv = new Uniform[MAX_SHIPS];
-        private final Uniform[] cullFluidFlowUv = new Uniform[MAX_SHIPS];
-        private final Uniform[] cullFluidOverlayUv = new Uniform[MAX_SHIPS];
         private final Uniform[] worldToShip = new Uniform[MAX_SHIPS];
     }
 
@@ -289,9 +244,16 @@ public final class ShipWaterPocketExternalWaterCull {
         }
         SHIP_MASKS.clear();
 
-        CULL_FLUID_UV_CACHE.clear();
-        cullFluidUvLastAtlasTexId = 0;
-        loggedCullFluidUvLookupFailed = false;
+        if (fluidMaskTexId != 0) {
+            TextureUtil.releaseTextureId(fluidMaskTexId);
+            fluidMaskTexId = 0;
+        }
+        fluidMaskWidth = 0;
+        fluidMaskHeight = 0;
+        fluidMaskLastAtlasTexId = 0;
+        fluidMaskData = null;
+        fluidMaskBuffer = null;
+        loggedFluidMaskBuildFailed = false;
 
         lastLevel = null;
     }
@@ -333,6 +295,7 @@ public final class ShipWaterPocketExternalWaterCull {
         setShipPass(shader, false);
 
         final Vec3 cameraPos = new Vec3(cameraX, cameraY, cameraZ);
+        SHADER.shader.setSampler("ValkyrienAir_FluidMask", ensureFluidMaskTexture(level));
         updateCameraAndWaterUv(cameraPos);
 
         final List<LoadedShip> ships = selectClosestShips(level, cameraPos, MAX_SHIPS);
@@ -385,6 +348,7 @@ public final class ShipWaterPocketExternalWaterCull {
         if (handles.chunkWorldOriginLoc >= 0) {
             GL20.glUniform3f(handles.chunkWorldOriginLoc, (float) cameraPos.x, (float) cameraPos.y, (float) cameraPos.z);
         }
+        bindProgramFluidMaskTexture(handles, ensureFluidMaskTexture(level));
         updateCameraAndWaterUvProgram(handles, cameraPos);
 
         final List<LoadedShip> ships = selectClosestShips(level, cameraPos, MAX_SHIPS);
@@ -541,13 +505,9 @@ public final class ShipWaterPocketExternalWaterCull {
             SHADER.cameraShipPos[i] = shader.getUniform("ValkyrienAir_CameraShipPos" + i);
             SHADER.gridMin[i] = shader.getUniform("ValkyrienAir_GridMin" + i);
             SHADER.gridSize[i] = shader.getUniform("ValkyrienAir_GridSize" + i);
-            SHADER.cullFluidStillUv[i] = shader.getUniform("ValkyrienAir_CullFluidStillUv" + i);
-            SHADER.cullFluidFlowUv[i] = shader.getUniform("ValkyrienAir_CullFluidFlowUv" + i);
-            SHADER.cullFluidOverlayUv[i] = shader.getUniform("ValkyrienAir_CullFluidOverlayUv" + i);
             SHADER.worldToShip[i] = shader.getUniform("ValkyrienAir_WorldToShip" + i);
             if (SHADER.shipAabbMin[i] == null || SHADER.shipAabbMax[i] == null || SHADER.gridMin[i] == null ||
-                SHADER.gridSize[i] == null || SHADER.cullFluidStillUv[i] == null || SHADER.cullFluidFlowUv[i] == null ||
-                SHADER.cullFluidOverlayUv[i] == null || SHADER.worldToShip[i] == null || SHADER.cameraShipPos[i] == null) {
+                SHADER.gridSize[i] == null || SHADER.worldToShip[i] == null || SHADER.cameraShipPos[i] == null) {
                 return;
             }
         }
@@ -566,7 +526,8 @@ public final class ShipWaterPocketExternalWaterCull {
         final int maxSafeUnits = Math.min(maxCombined, GLSTATEMANAGER_SAFE_TEXTURE_UNITS);
         handles.maxSafeTextureUnits = maxSafeUnits;
         final int availableUnits = maxSafeUnits - BASE_MASK_TEX_UNIT;
-        handles.maxMaskSlots = Math.max(0, Math.min(MAX_SHIPS, Math.max(0, availableUnits) / 2));
+        final int availableUnitsForShipMasks = Math.max(0, availableUnits - 1); // Reserve 1 unit for the fluid mask.
+        handles.maxMaskSlots = Math.max(0, Math.min(MAX_SHIPS, availableUnitsForShipMasks / 2));
 
         handles.regionOffsetLoc = GL20.glGetUniformLocation(programId, "u_RegionOffset");
         handles.blockTexLoc = GL20.glGetUniformLocation(programId, "u_BlockTex");
@@ -584,6 +545,7 @@ public final class ShipWaterPocketExternalWaterCull {
         handles.waterStillUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterStillUv");
         handles.waterFlowUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterFlowUv");
         handles.waterOverlayUvLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_WaterOverlayUv");
+        handles.fluidMaskLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_FluidMask");
         handles.shipWaterTintEnabledLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipWaterTintEnabled");
         handles.shipWaterTintLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ShipWaterTint");
         handles.chunkWorldOriginLoc = GL20.glGetUniformLocation(programId, "ValkyrienAir_ChunkWorldOrigin");
@@ -594,9 +556,6 @@ public final class ShipWaterPocketExternalWaterCull {
 		            handles.cameraShipPosLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CameraShipPos" + i);
 		            handles.gridMinLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridMin" + i);
 		            handles.gridSizeLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_GridSize" + i);
-		            handles.cullFluidStillUvLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CullFluidStillUv" + i);
-		            handles.cullFluidFlowUvLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CullFluidFlowUv" + i);
-		            handles.cullFluidOverlayUvLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_CullFluidOverlayUv" + i);
 		            handles.worldToShipLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_WorldToShip" + i);
 		            handles.airMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_AirMask" + i);
 		            handles.occMaskLoc[i] = GL20.glGetUniformLocation(programId, "ValkyrienAir_OccMask" + i);
@@ -606,9 +565,6 @@ public final class ShipWaterPocketExternalWaterCull {
 		                    handles.shipAabbMinLoc[i] >= 0 &&
 		                    handles.shipAabbMaxLoc[i] >= 0 &&
 		                    handles.gridSizeLoc[i] >= 0 &&
-		                    handles.cullFluidStillUvLoc[i] >= 0 &&
-		                    handles.cullFluidFlowUvLoc[i] >= 0 &&
-		                    handles.cullFluidOverlayUvLoc[i] >= 0 &&
 		                    handles.worldToShipLoc[i] >= 0 &&
 		                    handles.airMaskLoc[i] >= 0 &&
 		                    handles.occMaskLoc[i] >= 0;
@@ -619,6 +575,7 @@ public final class ShipWaterPocketExternalWaterCull {
                 handles.cullEnabledLoc >= 0 &&
                 handles.isShipPassLoc >= 0 &&
                 handles.cameraWorldPosLoc >= 0 &&
+                handles.fluidMaskLoc >= 0 &&
                 handles.maxMaskSlots > 0 &&
                 handles.shipSlotSupported[0];
 
@@ -672,80 +629,6 @@ public final class ShipWaterPocketExternalWaterCull {
         }
     }
 
-    private static CullFluidUvBounds getCullFluidUvBounds(final ClientLevel level, final Fluid fluid) {
-        if (level == null || fluid == null) return INVALID_CULL_FLUID_UVS;
-
-        final Minecraft mc = Minecraft.getInstance();
-        final AbstractTexture atlasTexture = mc.getTextureManager().getTexture(InventoryMenu.BLOCK_ATLAS);
-        final int atlasTexId = atlasTexture != null ? atlasTexture.getId() : 0;
-        if (atlasTexId != cullFluidUvLastAtlasTexId) {
-            CULL_FLUID_UV_CACHE.clear();
-            cullFluidUvLastAtlasTexId = atlasTexId;
-        }
-
-        final Fluid canonical = fluid instanceof final FlowingFluid flowing ? flowing.getSource() : fluid;
-        final CullFluidUvBounds cached = CULL_FLUID_UV_CACHE.get(canonical);
-        if (cached != null) return cached;
-
-        final CullFluidUvBounds computed = computeCullFluidUvBounds(level, canonical);
-        CULL_FLUID_UV_CACHE.put(canonical, computed);
-        return computed;
-    }
-
-    private static CullFluidUvBounds computeCullFluidUvBounds(final ClientLevel level, final Fluid fluid) {
-        if (fluid == null) return INVALID_CULL_FLUID_UVS;
-
-        final Function<ResourceLocation, TextureAtlasSprite> atlas =
-            Minecraft.getInstance().getTextureAtlas(InventoryMenu.BLOCK_ATLAS);
-
-        TextureAtlasSprite stillSprite = null;
-        TextureAtlasSprite flowSprite = null;
-        TextureAtlasSprite overlaySprite = null;
-
-        // Vanilla fast-paths (no reflection).
-        if (fluid == Fluids.WATER || fluid == Fluids.FLOWING_WATER) {
-            stillSprite = atlas.apply(WATER_STILL);
-            flowSprite = atlas.apply(WATER_FLOW);
-            overlaySprite = atlas.apply(WATER_OVERLAY);
-        } else if (fluid == Fluids.LAVA || fluid == Fluids.FLOWING_LAVA) {
-            stillSprite = atlas.apply(LAVA_STILL);
-            flowSprite = atlas.apply(LAVA_FLOW);
-        } else {
-            final FluidState state = fluid.defaultFluidState();
-
-            // Forge: query fluid render properties for texture IDs (supports modded fluids).
-            final ResourceLocation[] forge = queryForgeFluidTextures(level, fluid, state);
-            if (forge != null) {
-                if (forge[0] != null) stillSprite = atlas.apply(forge[0]);
-                if (forge[1] != null) flowSprite = atlas.apply(forge[1]);
-                if (forge[2] != null) overlaySprite = atlas.apply(forge[2]);
-            } else {
-                // Fabric: query fluid render handler sprites (best-effort).
-                final TextureAtlasSprite[] sprites = queryFabricFluidSprites(level, fluid, state);
-                if (sprites != null) {
-                    if (sprites.length > 0) stillSprite = sprites[0];
-                    if (sprites.length > 1) flowSprite = sprites[1];
-                    if (sprites.length > 2) overlaySprite = sprites[2];
-                }
-            }
-        }
-
-        return new CullFluidUvBounds(
-            stillSprite != null ? stillSprite.getU0() : INVALID_U0,
-            stillSprite != null ? stillSprite.getV0() : INVALID_V0,
-            stillSprite != null ? stillSprite.getU1() : INVALID_U1,
-            stillSprite != null ? stillSprite.getV1() : INVALID_V1,
-            flowSprite != null ? flowSprite.getU0() : INVALID_U0,
-            flowSprite != null ? flowSprite.getV0() : INVALID_V0,
-            flowSprite != null ? flowSprite.getU1() : INVALID_U1,
-            flowSprite != null ? flowSprite.getV1() : INVALID_V1,
-            overlaySprite != null ? overlaySprite.getU0() : INVALID_U0,
-            overlaySprite != null ? overlaySprite.getV0() : INVALID_V0,
-            overlaySprite != null ? overlaySprite.getU1() : INVALID_U1,
-            overlaySprite != null ? overlaySprite.getV1() : INVALID_V1
-        );
-    }
-
     private static ResourceLocation[] queryForgeFluidTextures(final ClientLevel level, final Fluid fluid, final FluidState fluidState) {
         if (!ensureForgeFluidTextureAccess()) return null;
         try {
@@ -781,9 +664,9 @@ public final class ShipWaterPocketExternalWaterCull {
         } catch (final ClassNotFoundException ignored) {
             return false;
         } catch (final Throwable t) {
-            if (!loggedCullFluidUvLookupFailed) {
-                loggedCullFluidUvLookupFailed = true;
-                LOGGER.warn("Failed to query Forge fluid render textures for culling; some modded fluids may not be culled.", t);
+            if (!loggedFluidMaskBuildFailed) {
+                loggedFluidMaskBuildFailed = true;
+                LOGGER.warn("Failed to query Forge fluid render textures for fluid culling; some modded fluids may not be culled.", t);
             }
             return false;
         }
@@ -821,9 +704,9 @@ public final class ShipWaterPocketExternalWaterCull {
         } catch (final ClassNotFoundException ignored) {
             return false;
         } catch (final Throwable t) {
-            if (!loggedCullFluidUvLookupFailed) {
-                loggedCullFluidUvLookupFailed = true;
-                LOGGER.warn("Failed to query Fabric fluid sprites for culling; some modded fluids may not be culled.", t);
+            if (!loggedFluidMaskBuildFailed) {
+                loggedFluidMaskBuildFailed = true;
+                LOGGER.warn("Failed to query Fabric fluid sprites for fluid culling; some modded fluids may not be culled.", t);
             }
             return false;
         }
@@ -922,11 +805,6 @@ public final class ShipWaterPocketExternalWaterCull {
 
             updateAirMask(level, masks, snapshot, shipTransform, gameTime, airKey);
 
-            final CullFluidUvBounds cullUv = getCullFluidUvBounds(level, snapshot.getFloodFluid());
-            SHADER.cullFluidStillUv[slot].set(cullUv.stillU0, cullUv.stillV0, cullUv.stillU1, cullUv.stillV1);
-            SHADER.cullFluidFlowUv[slot].set(cullUv.flowU0, cullUv.flowV0, cullUv.flowU1, cullUv.flowV1);
-            SHADER.cullFluidOverlayUv[slot].set(cullUv.overlayU0, cullUv.overlayV0, cullUv.overlayU1, cullUv.overlayV1);
-
             // Bind samplers for this slot.
             SHADER.shader.setSampler("ValkyrienAir_AirMask" + slot, masks.airTexId);
             SHADER.shader.setSampler("ValkyrienAir_OccMask" + slot, masks.occTexId);
@@ -961,9 +839,6 @@ public final class ShipWaterPocketExternalWaterCull {
             SHADER.cameraShipPos[slot].upload();
             SHADER.gridMin[slot].upload();
             SHADER.gridSize[slot].upload();
-            SHADER.cullFluidStillUv[slot].upload();
-            SHADER.cullFluidFlowUv[slot].upload();
-            SHADER.cullFluidOverlayUv[slot].upload();
             SHADER.worldToShip[slot].upload();
         }
 
@@ -1039,17 +914,6 @@ public final class ShipWaterPocketExternalWaterCull {
 
             updateAirMask(level, masks, snapshot, shipTransform, gameTime, airKey);
 
-            final CullFluidUvBounds cullUv = getCullFluidUvBounds(level, snapshot.getFloodFluid());
-            if (handles.cullFluidStillUvLoc[slot] >= 0) {
-                GL20.glUniform4f(handles.cullFluidStillUvLoc[slot], cullUv.stillU0, cullUv.stillV0, cullUv.stillU1, cullUv.stillV1);
-            }
-            if (handles.cullFluidFlowUvLoc[slot] >= 0) {
-                GL20.glUniform4f(handles.cullFluidFlowUvLoc[slot], cullUv.flowU0, cullUv.flowV0, cullUv.flowU1, cullUv.flowV1);
-            }
-            if (handles.cullFluidOverlayUvLoc[slot] >= 0) {
-                GL20.glUniform4f(handles.cullFluidOverlayUvLoc[slot], cullUv.overlayU0, cullUv.overlayV0, cullUv.overlayU1, cullUv.overlayV1);
-            }
-
             bindProgramMaskTextures(handles, slot, masks.airTexId, masks.occTexId);
 
             // Slot uniforms.
@@ -1107,9 +971,6 @@ public final class ShipWaterPocketExternalWaterCull {
         SHADER.cameraShipPos[slot].set(0.0f, 0.0f, 0.0f);
         SHADER.gridMin[slot].set(0.0f, 0.0f, 0.0f, 0.0f);
         SHADER.gridSize[slot].set(0.0f, 0.0f, 0.0f, 0.0f);
-        SHADER.cullFluidStillUv[slot].set(1.0f, 1.0f, 0.0f, 0.0f);
-        SHADER.cullFluidFlowUv[slot].set(1.0f, 1.0f, 0.0f, 0.0f);
-        SHADER.cullFluidOverlayUv[slot].set(1.0f, 1.0f, 0.0f, 0.0f);
         SHADER.worldToShip[slot].set(IDENTITY_MAT4);
 
         SHADER.shipAabbMin[slot].upload();
@@ -1117,9 +978,6 @@ public final class ShipWaterPocketExternalWaterCull {
         SHADER.cameraShipPos[slot].upload();
         SHADER.gridMin[slot].upload();
         SHADER.gridSize[slot].upload();
-        SHADER.cullFluidStillUv[slot].upload();
-        SHADER.cullFluidFlowUv[slot].upload();
-        SHADER.cullFluidOverlayUv[slot].upload();
         SHADER.worldToShip[slot].upload();
     }
 
@@ -1138,15 +996,6 @@ public final class ShipWaterPocketExternalWaterCull {
         }
         if (handles.gridSizeLoc[slot] >= 0) {
             GL20.glUniform4f(handles.gridSizeLoc[slot], 0.0f, 0.0f, 0.0f, 0.0f);
-        }
-        if (handles.cullFluidStillUvLoc[slot] >= 0) {
-            GL20.glUniform4f(handles.cullFluidStillUvLoc[slot], 1.0f, 1.0f, 0.0f, 0.0f);
-        }
-        if (handles.cullFluidFlowUvLoc[slot] >= 0) {
-            GL20.glUniform4f(handles.cullFluidFlowUvLoc[slot], 1.0f, 1.0f, 0.0f, 0.0f);
-        }
-        if (handles.cullFluidOverlayUvLoc[slot] >= 0) {
-            GL20.glUniform4f(handles.cullFluidOverlayUvLoc[slot], 1.0f, 1.0f, 0.0f, 0.0f);
         }
         uploadMatrixUniform(handles.worldToShipLoc[slot], IDENTITY_MAT4);
 
@@ -1174,6 +1023,20 @@ public final class ShipWaterPocketExternalWaterCull {
         GlStateManager._bindTexture(occTexId);
 
         // Avoid surprising other render code by leaving the active texture on a high unit.
+        GlStateManager._activeTexture(GL13.GL_TEXTURE0);
+    }
+
+    private static void bindProgramFluidMaskTexture(final ProgramHandles handles, final int fluidMaskTexId) {
+        if (handles == null) return;
+        if (handles.fluidMaskLoc < 0) return;
+
+        // Bind after the per-ship (air/occ) units.
+        final int fluidUnit = BASE_MASK_TEX_UNIT + handles.maxMaskSlots * 2;
+        if (fluidUnit < 0 || fluidUnit >= handles.maxSafeTextureUnits) return;
+
+        GL20.glUniform1i(handles.fluidMaskLoc, fluidUnit);
+        GlStateManager._activeTexture(GL13.GL_TEXTURE0 + fluidUnit);
+        GlStateManager._bindTexture(fluidMaskTexId);
         GlStateManager._activeTexture(GL13.GL_TEXTURE0);
     }
 
@@ -1359,6 +1222,124 @@ public final class ShipWaterPocketExternalWaterCull {
         uploadIntTexture(masks.airTexId, MASK_TEX_WIDTH, masks.airTexHeight, masks.airBuffer);
     }
 
+    private static int ensureFluidMaskTexture(final ClientLevel level) {
+        if (level == null) return 0;
+
+        final Minecraft mc = Minecraft.getInstance();
+        final AbstractTexture atlasTexture = mc.getTextureManager().getTexture(InventoryMenu.BLOCK_ATLAS);
+        if (atlasTexture == null) return 0;
+
+        final int atlasTexId = atlasTexture.getId();
+        if (atlasTexId == 0) return 0;
+
+        int atlasWidth = 0;
+        int atlasHeight = 0;
+
+        final int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        try {
+            GlStateManager._bindTexture(atlasTexId);
+            atlasWidth = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_WIDTH);
+            atlasHeight = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0, GL11.GL_TEXTURE_HEIGHT);
+        } finally {
+            GlStateManager._bindTexture(prevBinding);
+        }
+
+        if (atlasWidth <= 0 || atlasHeight <= 0) return 0;
+
+        final boolean needsRebuild =
+            fluidMaskTexId == 0 ||
+                fluidMaskWidth != atlasWidth ||
+                fluidMaskHeight != atlasHeight ||
+                fluidMaskLastAtlasTexId != atlasTexId;
+
+        if (!needsRebuild) return fluidMaskTexId;
+
+        if (fluidMaskTexId != 0 && (fluidMaskWidth != atlasWidth || fluidMaskHeight != atlasHeight)) {
+            TextureUtil.releaseTextureId(fluidMaskTexId);
+            fluidMaskTexId = 0;
+        }
+
+        fluidMaskTexId = ensureByteTexture(fluidMaskTexId, atlasWidth, atlasHeight);
+        fluidMaskWidth = atlasWidth;
+        fluidMaskHeight = atlasHeight;
+        fluidMaskLastAtlasTexId = atlasTexId;
+
+        final int capacity = atlasWidth * atlasHeight;
+        if (fluidMaskData == null || fluidMaskData.length != capacity) {
+            fluidMaskData = new byte[capacity];
+            fluidMaskBuffer = BufferUtils.createByteBuffer(capacity);
+        } else {
+            Arrays.fill(fluidMaskData, (byte) 0);
+        }
+
+        final Function<ResourceLocation, TextureAtlasSprite> atlas = mc.getTextureAtlas(InventoryMenu.BLOCK_ATLAS);
+        final List<TextureAtlasSprite> sprites = new ArrayList<>();
+
+        // Always include vanilla fluids.
+        sprites.add(atlas.apply(WATER_STILL));
+        sprites.add(atlas.apply(WATER_FLOW));
+        sprites.add(atlas.apply(WATER_OVERLAY));
+        sprites.add(atlas.apply(LAVA_STILL));
+        sprites.add(atlas.apply(LAVA_FLOW));
+
+        // Best-effort: include modded fluids by enumerating registered fluids and asking their client render props.
+        final HashSet<ResourceLocation> textureIds = new HashSet<>();
+        for (final Fluid regFluid : BuiltInRegistries.FLUID) {
+            try {
+                final Fluid fluid = regFluid instanceof final FlowingFluid flowing ? flowing.getSource() : regFluid;
+                final FluidState fs = fluid.defaultFluidState();
+
+                final ResourceLocation[] forge = queryForgeFluidTextures(level, fluid, fs);
+                if (forge != null) {
+                    if (forge.length > 0 && forge[0] != null && textureIds.add(forge[0])) sprites.add(atlas.apply(forge[0]));
+                    if (forge.length > 1 && forge[1] != null && textureIds.add(forge[1])) sprites.add(atlas.apply(forge[1]));
+                    if (forge.length > 2 && forge[2] != null && textureIds.add(forge[2])) sprites.add(atlas.apply(forge[2]));
+                } else {
+                    final TextureAtlasSprite[] fabric = queryFabricFluidSprites(level, fluid, fs);
+                    if (fabric != null) {
+                        for (final TextureAtlasSprite sprite : fabric) {
+                            if (sprite != null) sprites.add(sprite);
+                        }
+                    }
+                }
+            } catch (final Throwable ignored) {
+                // Per-fluid errors should not break the entire mask.
+            }
+        }
+
+        // Paint the mask by sprite rectangles in atlas pixel space.
+        final HashSet<ResourceLocation> seenSprites = new HashSet<>();
+        for (final TextureAtlasSprite sprite : sprites) {
+            if (sprite == null) continue;
+            final ResourceLocation name = sprite.contents().name();
+            if (!seenSprites.add(name)) continue;
+
+            final int x0 = sprite.getX();
+            final int y0 = sprite.getY();
+            final int w = sprite.contents().width();
+            final int h = sprite.contents().height();
+
+            if (w <= 0 || h <= 0) continue;
+            if (x0 < 0 || y0 < 0) continue;
+
+            final int x1 = Math.min(atlasWidth, x0 + w);
+            final int y1 = Math.min(atlasHeight, y0 + h);
+            if (x1 <= x0 || y1 <= y0) continue;
+
+            for (int y = y0; y < y1; y++) {
+                final int rowBase = y * atlasWidth;
+                Arrays.fill(fluidMaskData, rowBase + x0, rowBase + x1, (byte) 0xFF);
+            }
+        }
+
+        fluidMaskBuffer.clear();
+        fluidMaskBuffer.put(fluidMaskData);
+        fluidMaskBuffer.flip();
+
+        uploadByteTexture(fluidMaskTexId, atlasWidth, atlasHeight, fluidMaskBuffer);
+        return fluidMaskTexId;
+    }
+
     private static Method findMethod(final Class<?> owner, final String name, final Class<?>... params) {
         try {
             return owner.getMethod(name, params);
@@ -1404,6 +1385,47 @@ public final class ShipWaterPocketExternalWaterCull {
                 GL11.GL_UNSIGNED_INT, (IntBuffer) null);
 
             return id;
+        } finally {
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
+            GlStateManager._bindTexture(prevBinding);
+        }
+    }
+
+    private static int ensureByteTexture(final int existingId, final int width, final int height) {
+        final int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        final int prevUnpackAlignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
+        try {
+            if (existingId != 0) {
+                GlStateManager._bindTexture(existingId);
+                return existingId;
+            }
+
+            final int id = TextureUtil.generateTextureId();
+            GlStateManager._bindTexture(id);
+
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+            GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+            GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R8, width, height, 0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE,
+                (java.nio.ByteBuffer) null);
+
+            return id;
+        } finally {
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
+            GlStateManager._bindTexture(prevBinding);
+        }
+    }
+
+    private static void uploadByteTexture(final int texId, final int width, final int height, final java.nio.ByteBuffer data) {
+        final int prevBinding = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        final int prevUnpackAlignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
+        try {
+            GlStateManager._bindTexture(texId);
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+            GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, width, height, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, data);
         } finally {
             GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
             GlStateManager._bindTexture(prevBinding);
