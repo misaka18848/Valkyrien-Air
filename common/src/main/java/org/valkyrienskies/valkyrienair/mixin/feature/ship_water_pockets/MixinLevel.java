@@ -1,12 +1,11 @@
 package org.valkyrienskies.valkyrienair.mixin.feature.ship_water_pockets;
 
 import net.minecraft.core.BlockPos;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
-import net.minecraft.world.level.material.Fluids;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -67,12 +66,13 @@ public abstract class MixinLevel {
         if (!VSGameUtilsKt.isBlockInShipyard(level, pos)) return;
 
         final var fluidState = state.getFluidState();
-        if (fluidState.isEmpty() || !fluidState.is(FluidTags.WATER)) return;
+        if (fluidState.isEmpty()) return;
+        if (!(state.getBlock() instanceof LiquidBlock)) return;
 
         final Ship ship = VSGameUtilsKt.getShipManagingPos(level, pos);
         if (ship == null) return;
 
-        if (ShipWaterPocketManager.shouldBlockShipyardWaterPlacement(level, ship.getId(), pos, ship.getTransform())) {
+        if (ShipWaterPocketManager.shouldBlockShipyardWaterPlacement(level, ship.getId(), pos)) {
             cir.setReturnValue(false);
             cir.cancel();
         }
@@ -129,9 +129,8 @@ public abstract class MixinLevel {
         if (VSGameUtilsKt.isBlockInShipyard(level, pos)) return;
 
         final BlockState original = cir.getReturnValue();
-        if (!original.is(Blocks.WATER)) return;
         final FluidState originalFluid = original.getFluidState();
-        if (originalFluid.isEmpty() || !originalFluid.is(FluidTags.WATER)) return;
+        if (originalFluid.isEmpty()) return;
 
         if (ShipWaterPocketManager.isWorldPosInShipAirPocket(level, pos)) {
             cir.setReturnValue(Blocks.AIR.defaultBlockState());

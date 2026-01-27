@@ -16,6 +16,7 @@
     "samplers": [
         { "name": "Sampler0" },
         { "name": "Sampler2" },
+        { "name": "ValkyrienAir_FluidMask" },
         { "name": "ValkyrienAir_AirMask0" },
         { "name": "ValkyrienAir_AirMask1" },
         { "name": "ValkyrienAir_AirMask2" },

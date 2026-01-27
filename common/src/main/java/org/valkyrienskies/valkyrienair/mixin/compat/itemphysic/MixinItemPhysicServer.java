@@ -3,7 +3,6 @@ package org.valkyrienskies.valkyrienair.mixin.compat.itemphysic;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.FluidState;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,7 +26,6 @@ public abstract class MixinItemPhysicServer {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(level, pos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (!original.isEmpty() && !original.is(FluidTags.WATER)) return original;
         return ShipWaterPocketManager.overrideWaterFluidState(level, pos, original);
     }
 }

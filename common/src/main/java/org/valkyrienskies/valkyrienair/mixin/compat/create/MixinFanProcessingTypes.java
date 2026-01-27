@@ -3,7 +3,6 @@ package org.valkyrienskies.valkyrienair.mixin.compat.create;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -41,7 +40,6 @@ public abstract class MixinFanProcessingTypes {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(level, pos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (!original.isEmpty() && !original.is(FluidTags.WATER)) return original;
         return ShipWaterPocketManager.overrideWaterFluidState(level, pos, original);
     }
 
@@ -58,7 +56,7 @@ public abstract class MixinFanProcessingTypes {
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
 
         final FluidState fluidState = original.getFluidState();
-        if (fluidState.isEmpty() || !fluidState.is(FluidTags.WATER)) return original;
+        if (fluidState.isEmpty()) return original;
 
         return ShipWaterPocketManager.isWorldPosInShipAirPocket(level, pos) ? valkyrienair$AIR : original;
     }

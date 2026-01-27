@@ -82,6 +82,7 @@ public final class ShipWaterPocketShaderInjector {
         uniform vec4 ValkyrienAir_WaterStillUv;
         uniform vec4 ValkyrienAir_WaterFlowUv;
         uniform vec4 ValkyrienAir_WaterOverlayUv;
+        uniform sampler2D ValkyrienAir_FluidMask;
         uniform float ValkyrienAir_ShipWaterTintEnabled;
         uniform vec3 ValkyrienAir_ShipWaterTint;
 
@@ -128,6 +129,10 @@ public final class ShipWaterPocketShaderInjector {
             return va_inUv(uv, ValkyrienAir_WaterStillUv) ||
                 va_inUv(uv, ValkyrienAir_WaterFlowUv) ||
                 va_inUv(uv, ValkyrienAir_WaterOverlayUv);
+        }
+
+        bool va_isFluidUv(vec2 uv) {
+            return texture(ValkyrienAir_FluidMask, uv).r > 0.5;
         }
 
         uint va_fetchWord(usampler2D tex, int wordIndex) {
@@ -260,7 +265,7 @@ public final class ShipWaterPocketShaderInjector {
             """;
 
 	    private static final String EMBEDDIUM_FRAGMENT_MAIN_INJECT = """
-	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isWaterUv(v_TexCoord)) {
+	            if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isFluidUv(v_TexCoord)) {
 	                // Sample slightly inside the water volume (below the surface) so we test the water block itself.
 	                vec3 camRelPos = valkyrienair_WorldPos + vec3(0.0, -VA_WORLD_SAMPLE_EPS, 0.0);
 	                vec3 worldPos = camRelPos + ValkyrienAir_CameraWorldPos;

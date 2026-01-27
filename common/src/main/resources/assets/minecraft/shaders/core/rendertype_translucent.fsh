@@ -25,6 +25,7 @@ uniform vec3 ValkyrienAir_CameraWorldPos;
 uniform vec4 ValkyrienAir_WaterStillUv;
 uniform vec4 ValkyrienAir_WaterFlowUv;
 uniform vec4 ValkyrienAir_WaterOverlayUv;
+uniform sampler2D ValkyrienAir_FluidMask;
 uniform float ValkyrienAir_ShipWaterTintEnabled;
 uniform vec3 ValkyrienAir_ShipWaterTint;
 
@@ -78,6 +79,11 @@ bool va_isWaterUv(vec2 uv) {
     return va_inUv(uv, ValkyrienAir_WaterStillUv) ||
         va_inUv(uv, ValkyrienAir_WaterFlowUv) ||
         va_inUv(uv, ValkyrienAir_WaterOverlayUv);
+}
+
+bool va_isFluidUv(vec2 uv) {
+    // Fluid UV mask (same UV space as the block atlas). Red=1 => fluid sprite.
+    return texture(ValkyrienAir_FluidMask, uv).r > 0.5;
 }
 
 uint va_fetchWord(usampler2D tex, int wordIndex) {
@@ -200,7 +206,7 @@ bool va_shouldDiscardForShip3(vec3 worldPos) {
 }
 
 void main() {
-    if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isWaterUv(texCoord0)) {
+    if (ValkyrienAir_CullEnabled > 0.5 && ValkyrienAir_IsShipPass < 0.5 && va_isFluidUv(texCoord0)) {
         vec3 worldPos = valkyrienair_CamRelPos + ValkyrienAir_CameraWorldPos;
         if (va_shouldDiscardForShip0(worldPos) || va_shouldDiscardForShip1(worldPos) ||
             va_shouldDiscardForShip2(worldPos) || va_shouldDiscardForShip3(worldPos)) {

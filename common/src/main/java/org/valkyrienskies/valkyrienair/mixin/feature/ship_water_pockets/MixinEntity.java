@@ -4,7 +4,6 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import java.util.function.BiPredicate;
 import net.minecraft.core.BlockPos;
-import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.BlockGetter;
@@ -252,7 +251,6 @@ public abstract class MixinEntity implements ShipWaterPocketEntityDuck {
         final Operation<FluidState> getFluidState) {
         final FluidState original = getFluidState.call(level, blockPos);
         if (!ValkyrienAirConfig.getEnableShipWaterPockets()) return original;
-        if (!original.isEmpty() && !original.is(FluidTags.WATER)) return original;
 
         final double eyeY = this.getEyeY() - 0.1111111119389534;
         return ShipWaterPocketManager.overrideWaterFluidState(level, this.getX(), eyeY, this.getZ(), original);

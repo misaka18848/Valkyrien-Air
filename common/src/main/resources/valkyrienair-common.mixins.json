@@ -19,6 +19,7 @@
     "compat.vs2.MixinBuoyancyHandlerAttachment",
     "compat.vs2.MixinVSGameUtilsKt",
     "feature.ship_water_pockets.MixinEntity",
+    "feature.ship_water_pockets.MixinFlowingFluid",
     "feature.ship_water_pockets.MixinLevel",
     "feature.ship_water_pockets.MixinLevelReader",
     "server.MixinMinecraftServer",

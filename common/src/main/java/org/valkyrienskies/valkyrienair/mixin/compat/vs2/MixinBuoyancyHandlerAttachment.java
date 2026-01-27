@@ -22,6 +22,9 @@ public abstract class MixinBuoyancyHandlerAttachment implements ValkyrienAirBuoy
     private static final double valkyrienair$GRAVITY_MAGNITUDE = 10.0;
 
     @Unique
+    private static final double valkyrienair$MAX_POCKET_BUOYANCY_WEIGHT_MULT = 1.25;
+
+    @Unique
     private volatile double valkyrienair$displacedVolume = 0.0;
 
     @Unique
@@ -103,14 +106,17 @@ public abstract class MixinBuoyancyHandlerAttachment implements ValkyrienAirBuoy
         final double pocketZ = valkyrienair$pocketCenterZ;
         if (!Double.isFinite(pocketX) || !Double.isFinite(pocketY) || !Double.isFinite(pocketZ)) return;
 
-        double upwardForce = displaced * valkyrienair$WATER_DENSITY * valkyrienair$GRAVITY_MAGNITUDE;
+        final double overlap = physShip.getLiquidOverlap();
+        if (!Double.isFinite(overlap) || overlap <= 1.0e-6) return;
+
+        double upwardForce = displaced * valkyrienair$WATER_DENSITY * valkyrienair$GRAVITY_MAGNITUDE * overlap;
         if (!Double.isFinite(upwardForce) || upwardForce <= 0.0) return;
 
         // Clamp to prevent runaway impulses if a ship has extremely low mass relative to displaced air volume.
         final double mass = physShip.getMass();
         if (!Double.isFinite(mass) || mass <= 1.0e-6) return;
 
-        final double maxForce = mass * valkyrienair$GRAVITY_MAGNITUDE * 5.0;
+        final double maxForce = mass * valkyrienair$GRAVITY_MAGNITUDE * valkyrienair$MAX_POCKET_BUOYANCY_WEIGHT_MULT;
         if (Double.isFinite(maxForce) && maxForce > 0.0) {
             upwardForce = Math.min(upwardForce, maxForce);
         }
