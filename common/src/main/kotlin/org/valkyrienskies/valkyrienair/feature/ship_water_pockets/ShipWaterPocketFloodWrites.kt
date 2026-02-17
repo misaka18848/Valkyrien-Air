@@ -1,0 +1,162 @@
+package org.valkyrienskies.valkyrienair.feature.ship_water_pockets
+
+import net.minecraft.core.BlockPos
+import net.minecraft.server.level.ServerLevel
+import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.level.material.Fluid
+import org.joml.Vector3d
+import org.valkyrienskies.core.api.ships.properties.ShipTransform
+import java.util.BitSet
+
+internal const val FLOOD_QUEUE_REMOVE_CAP_PER_TICK: Int = 512
+internal const val FLOOD_QUEUE_ADD_CAP_PER_TICK: Int = 512
+
+private const val FLOOD_QUEUE_SETBLOCK_FLAGS: Int = 3 // UPDATE_NEIGHBORS | UPDATE_CLIENTS
+
+internal data class FloodWriteFlushResult(
+    val removed: Int,
+    val added: Int,
+    val remainingQueued: Int,
+)
+
+internal fun enqueueFloodWriteDiffs(
+    state: ShipPocketState,
+    toAdd: BitSet,
+    toRemove: BitSet,
+) {
+    if (!toRemove.isEmpty) {
+        state.queuedFloodRemoves.or(toRemove)
+        state.queuedFloodAdds.andNot(toRemove)
+    }
+    if (!toAdd.isEmpty) {
+        state.queuedFloodAdds.or(toAdd)
+        state.queuedFloodRemoves.andNot(toAdd)
+    }
+}
+
+internal fun clearFloodWriteQueues(state: ShipPocketState) {
+    state.queuedFloodAdds.clear()
+    state.queuedFloodRemoves.clear()
+    state.nextQueuedAddIdx = 0
+    state.nextQueuedRemoveIdx = 0
+}
+
+private fun processQueuedIndices(
+    queue: BitSet,
+    startCursor: Int,
+    budget: Int,
+    handle: (Int) -> Unit,
+): Pair<Int, Int> {
+    if (budget <= 0 || queue.isEmpty) return 0 to 0
+
+    var processed = 0
+    val start = startCursor.coerceAtLeast(0)
+    var idx = queue.nextSetBit(start)
+    if (idx < 0 && start > 0) {
+        idx = queue.nextSetBit(0)
+    }
+
+    while (idx >= 0 && processed < budget) {
+        val current = idx
+        idx = queue.nextSetBit(current + 1)
+        handle(current)
+        queue.clear(current)
+        processed++
+        if (idx < 0 && processed < budget) {
+            idx = queue.nextSetBit(0)
+        }
+    }
+
+    return processed to if (idx >= 0) idx else 0
+}
+
+internal fun flushFloodWriteQueue(
+    level: ServerLevel,
+    state: ShipPocketState,
+    shipTransform: ShipTransform,
+    removeCap: Int = FLOOD_QUEUE_REMOVE_CAP_PER_TICK,
+    addCap: Int = FLOOD_QUEUE_ADD_CAP_PER_TICK,
+    setApplyingInternalUpdates: (Boolean) -> Unit,
+    isFloodFluidType: (Fluid) -> Boolean,
+    isIngressQualifiedForAdd: (
+        pos: BlockPos.MutableBlockPos,
+        shipTransform: ShipTransform,
+        shipPosTmp: Vector3d,
+        worldPosTmp: Vector3d,
+        worldBlockPos: BlockPos.MutableBlockPos,
+    ) -> Boolean,
+): FloodWriteFlushResult {
+    if (state.queuedFloodAdds.isEmpty && state.queuedFloodRemoves.isEmpty) {
+        return FloodWriteFlushResult(removed = 0, added = 0, remainingQueued = 0)
+    }
+
+    val volume = state.sizeX * state.sizeY * state.sizeZ
+    if (volume <= 0) {
+        clearFloodWriteQueues(state)
+        return FloodWriteFlushResult(removed = 0, added = 0, remainingQueued = 0)
+    }
+
+    val pos = BlockPos.MutableBlockPos()
+    val worldPosTmp = Vector3d()
+    val shipPosTmp = Vector3d()
+    val worldBlockPos = BlockPos.MutableBlockPos()
+    val sourceBlockState = state.floodFluid.defaultFluidState().createLegacyBlock()
+
+    var removedApplied = 0
+    var addedApplied = 0
+
+    setApplyingInternalUpdates(true)
+    try {
+        val removeResult = processQueuedIndices(
+            queue = state.queuedFloodRemoves,
+            startCursor = state.nextQueuedRemoveIdx,
+            budget = removeCap,
+        ) { idx ->
+            if (idx < 0 || idx >= volume) return@processQueuedIndices
+            posFromIndex(state, idx, pos)
+            val current = level.getBlockState(pos)
+            val currentFluid = current.fluidState
+            if (!currentFluid.isEmpty && isFloodFluidType(currentFluid.type)) {
+                level.setBlock(pos, Blocks.AIR.defaultBlockState(), FLOOD_QUEUE_SETBLOCK_FLAGS)
+                level.scheduleTick(pos, state.floodFluid, 1)
+                removedApplied++
+            }
+            state.materializedWater.clear(idx)
+        }
+        state.nextQueuedRemoveIdx = removeResult.second
+
+        val addResult = processQueuedIndices(
+            queue = state.queuedFloodAdds,
+            startCursor = state.nextQueuedAddIdx,
+            budget = addCap,
+        ) { idx ->
+            if (idx < 0 || idx >= volume) return@processQueuedIndices
+            posFromIndex(state, idx, pos)
+            val current = level.getBlockState(pos)
+            val currentFluid = current.fluidState
+
+            if (!currentFluid.isEmpty && isFloodFluidType(currentFluid.type)) {
+                state.materializedWater.set(idx)
+                return@processQueuedIndices
+            }
+            if (!current.isAir) return@processQueuedIndices
+
+            val ingressQualified = isIngressQualifiedForAdd(pos, shipTransform, shipPosTmp, worldPosTmp, worldBlockPos)
+            if (!ingressQualified) return@processQueuedIndices
+
+            level.setBlock(pos, sourceBlockState, FLOOD_QUEUE_SETBLOCK_FLAGS)
+            level.scheduleTick(pos, state.floodFluid, 1)
+            state.materializedWater.set(idx)
+            addedApplied++
+        }
+        state.nextQueuedAddIdx = addResult.second
+    } finally {
+        setApplyingInternalUpdates(false)
+    }
+
+    return FloodWriteFlushResult(
+        removed = removedApplied,
+        added = addedApplied,
+        remainingQueued = state.queuedFloodAdds.cardinality() + state.queuedFloodRemoves.cardinality(),
+    )
+}

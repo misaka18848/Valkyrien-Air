@@ -67,3 +67,12 @@ internal fun isAirPocket(state: ShipPocketState, shipPos: BlockPos): Boolean {
     val idx = indexOf(state, lx, ly, lz)
     return state.unreachableVoid.get(idx) && !state.materializedWater.get(idx)
 }
+
+internal fun isWorldFluidSuppressionCell(state: ShipPocketState, shipPos: BlockPos): Boolean {
+    val lx = shipPos.x - state.minX
+    val ly = shipPos.y - state.minY
+    val lz = shipPos.z - state.minZ
+    if (lx !in 0 until state.sizeX || ly !in 0 until state.sizeY || lz !in 0 until state.sizeZ) return false
+    val idx = indexOf(state, lx, ly, lz)
+    return state.interior.get(idx) && !state.materializedWater.get(idx)
+}

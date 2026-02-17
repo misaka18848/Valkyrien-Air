@@ -221,11 +221,42 @@ internal fun findNearbyAirPocket(
     shipBlockPos: BlockPos.MutableBlockPos,
     radius: Int,
 ): BlockPos.MutableBlockPos? {
+    return findNearbyStateCellByPredicate(
+        state = state,
+        shipPos = shipPos,
+        shipBlockPos = shipBlockPos,
+        radius = radius,
+        predicate = ::isAirPocket,
+    )
+}
+
+internal fun findNearbyWorldFluidSuppressionZone(
+    state: ShipPocketState,
+    shipPos: Vector3d,
+    shipBlockPos: BlockPos.MutableBlockPos,
+    radius: Int,
+): BlockPos.MutableBlockPos? {
+    return findNearbyStateCellByPredicate(
+        state = state,
+        shipPos = shipPos,
+        shipBlockPos = shipBlockPos,
+        radius = radius,
+        predicate = ::isWorldFluidSuppressionCell,
+    )
+}
+
+private fun findNearbyStateCellByPredicate(
+    state: ShipPocketState,
+    shipPos: Vector3d,
+    shipBlockPos: BlockPos.MutableBlockPos,
+    radius: Int,
+    predicate: (ShipPocketState, BlockPos) -> Boolean,
+): BlockPos.MutableBlockPos? {
     val baseX = shipBlockPos.x
     val baseY = shipBlockPos.y
     val baseZ = shipBlockPos.z
 
-    if (isAirPocket(state, shipBlockPos)) return shipBlockPos
+    if (predicate(state, shipBlockPos)) return shipBlockPos
 
     val e = POINT_QUERY_EPS
     for (dxi in -1..1) {
@@ -240,7 +271,7 @@ internal fun findNearbyAirPocket(
                     Mth.floor(shipPos.y + dy),
                     Mth.floor(shipPos.z + dz),
                 )
-                if (isAirPocket(state, shipBlockPos)) return shipBlockPos
+                if (predicate(state, shipBlockPos)) return shipBlockPos
             }
         }
     }
@@ -267,7 +298,7 @@ internal fun findNearbyAirPocket(
             for (dz in -radius..radius) {
                 val pz = baseZ + dz
                 shipBlockPos.set(px, py, pz)
-                if (!isAirPocket(state, shipBlockPos)) continue
+                if (!predicate(state, shipBlockPos)) continue
 
                 val cz = pz + 0.5
                 val ddz = z - cz

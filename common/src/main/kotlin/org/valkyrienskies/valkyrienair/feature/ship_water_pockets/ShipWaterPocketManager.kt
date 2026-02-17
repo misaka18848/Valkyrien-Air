@@ -33,7 +33,10 @@ import org.valkyrienskies.valkyrienair.config.ValkyrienAirConfig
 import org.valkyrienskies.valkyrienair.mixinducks.compat.vs2.ValkyrienAirBuoyancyAttachmentDuck
 import java.util.BitSet
 import java.util.HashMap
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -62,6 +65,7 @@ object ShipWaterPocketManager {
     private const val FLOOD_ENTER_PLANE_EPS = 1e-4
     private const val FLOOD_EXIT_PLANE_EPS = 3e-4
     private const val SUBMERGED_INGRESS_MIN_COVERAGE = 0.34
+    private const val GEOMETRY_ASYNC_SUBMISSIONS_PER_LEVEL_PER_TICK = 2
     @Volatile
     private var applyingInternalUpdates: Boolean = false
 
@@ -75,6 +79,10 @@ object ShipWaterPocketManager {
     private val tmpQueryAabb: ThreadLocal<AABBd> = ThreadLocal.withInitial { AABBd() }
     private val tmpWorldPos: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
     private val tmpShipPos: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
+    private val tmpWorldPos2: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
+    private val tmpShipPos2: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
+    private val tmpWorldPos3: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
+    private val tmpShipPos3: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
     private val tmpShipBlockPos: ThreadLocal<BlockPos.MutableBlockPos> =
         ThreadLocal.withInitial { BlockPos.MutableBlockPos() }
     private val tmpShipFlowDir: ThreadLocal<Vector3d> = ThreadLocal.withInitial { Vector3d() }
@@ -100,7 +108,25 @@ object ShipWaterPocketManager {
     private val tmpPressureEscapeHeight: ThreadLocal<DoubleArray> = ThreadLocal.withInitial { DoubleArray(0) }
     private val tmpPressureHeapIdx: ThreadLocal<IntArray> = ThreadLocal.withInitial { IntArray(0) }
     private val tmpPressureHeapPos: ThreadLocal<IntArray> = ThreadLocal.withInitial { IntArray(0) }
+    private val tmpSubmergedCoverage: ThreadLocal<DoubleArray> = ThreadLocal.withInitial { DoubleArray(0) }
     private val coverageFallbackDiagCount = AtomicLong(0)
+    private val geometryJobThreadCounter = AtomicLong(0)
+    private val geometryJobsSubmitted = AtomicLong(0)
+    private val geometryJobsCompleted = AtomicLong(0)
+    private val geometryJobsDiscarded = AtomicLong(0)
+    private val geometryJobsFailed = AtomicLong(0)
+    private val geometryComputeNanosTotal = AtomicLong(0)
+    private val worldSuppressionHits = AtomicLong(0)
+    private val floodQueueBacklogHighWater = AtomicLong(0)
+    private val geometryExecutor: ExecutorService by lazy {
+        val processors = Runtime.getRuntime().availableProcessors()
+        val threads = maxOf(1, minOf(2, processors - 1))
+        Executors.newFixedThreadPool(threads) { runnable ->
+            Thread(runnable, "ValkyrienAir-ShipPocket-${geometryJobThreadCounter.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+    }
 
     private data class BuoyancyFluidProps(
         val density: Double,
@@ -172,7 +198,9 @@ object ShipWaterPocketManager {
         if (!ValkyrienAirConfig.enableShipWaterPockets) return
         val map = (if (level.isClientSide) clientStates else serverStates)
             .computeIfAbsent(level.dimensionId) { ConcurrentHashMap() }
-        map.computeIfAbsent(shipId) { ShipPocketState() }.dirty = true
+        val state = map.computeIfAbsent(shipId) { ShipPocketState() }
+        state.dirty = true
+        state.geometryInvalidationStamp++
     }
 
     /**
@@ -211,12 +239,214 @@ object ShipWaterPocketManager {
         return true
     }
 
+    private fun logThrottledDiag(counter: Long, message: String, vararg args: Any?) {
+        if (counter <= 3L || counter % 512L == 0L) {
+            log.debug(message, *args)
+        }
+    }
+
+    private fun boundsMismatch(
+        state: ShipPocketState,
+        minX: Int,
+        minY: Int,
+        minZ: Int,
+        sizeX: Int,
+        sizeY: Int,
+        sizeZ: Int,
+    ): Boolean {
+        return state.sizeX != sizeX ||
+            state.sizeY != sizeY ||
+            state.sizeZ != sizeZ ||
+            state.minX != minX ||
+            state.minY != minY ||
+            state.minZ != minZ
+    }
+
+    private fun trySubmitGeometryJob(
+        level: Level,
+        state: ShipPocketState,
+        minX: Int,
+        minY: Int,
+        minZ: Int,
+        sizeX: Int,
+        sizeY: Int,
+        sizeZ: Int,
+    ): Boolean {
+        val pending = state.pendingGeometryFuture
+        if (pending != null && !pending.isDone) {
+            state.geometryJobInFlight = true
+            return false
+        }
+
+        val generation = state.requestedGeometryGeneration + 1L
+        state.requestedGeometryGeneration = generation
+        val invalidationStamp = state.geometryInvalidationStamp
+
+        val snapshot = try {
+            captureGeometryAsyncSnapshot(
+                level = level,
+                generation = generation,
+                invalidationStamp = invalidationStamp,
+                minX = minX,
+                minY = minY,
+                minZ = minZ,
+                sizeX = sizeX,
+                sizeY = sizeY,
+                sizeZ = sizeZ,
+                floodFluid = state.floodFluid,
+            )
+        } catch (t: Throwable) {
+            val count = geometryJobsFailed.incrementAndGet()
+            logThrottledDiag(count, "Failed to capture ship pocket geometry snapshot", t)
+            state.dirty = true
+            return false
+        }
+
+        state.pendingGeometryFuture = CompletableFuture.supplyAsync(
+            { computeGeometryAsync(snapshot) },
+            geometryExecutor,
+        )
+        state.geometryJobInFlight = true
+
+        val count = geometryJobsSubmitted.incrementAndGet()
+        logThrottledDiag(
+            count,
+            "Submitted ship pocket geometry job gen={} invalidation={} bounds=({}, {}, {} ; {}x{}x{})",
+            generation,
+            invalidationStamp,
+            minX,
+            minY,
+            minZ,
+            sizeX,
+            sizeY,
+            sizeZ,
+        )
+        return true
+    }
+
+    private fun applyGeometryResult(
+        state: ShipPocketState,
+        result: GeometryAsyncResult,
+    ) {
+        val boundsChanged = boundsMismatch(
+            state = state,
+            minX = result.minX,
+            minY = result.minY,
+            minZ = result.minZ,
+            sizeX = result.sizeX,
+            sizeY = result.sizeY,
+            sizeZ = result.sizeZ,
+        )
+
+        val prevOpen = state.open
+        val prevFaceCondXP = state.faceCondXP
+        val prevFaceCondYP = state.faceCondYP
+        val prevFaceCondZP = state.faceCondZP
+
+        state.minX = result.minX
+        state.minY = result.minY
+        state.minZ = result.minZ
+        state.sizeX = result.sizeX
+        state.sizeY = result.sizeY
+        state.sizeZ = result.sizeZ
+
+        state.open = result.open
+        state.exterior = result.exterior
+        state.interior = result.interior
+        state.flooded = result.flooded
+        state.materializedWater = result.materializedWater
+        state.faceCondXP = result.faceCondXP
+        state.faceCondYP = result.faceCondYP
+        state.faceCondZP = result.faceCondZP
+        state.waterReachable = BitSet(result.sizeX * result.sizeY * result.sizeZ)
+        state.unreachableVoid = state.open.clone() as BitSet
+        state.floodPlaneByComponent.clear()
+        clearFloodWriteQueues(state)
+
+        if (
+            boundsChanged ||
+            prevOpen != state.open ||
+            !prevFaceCondXP.contentEquals(state.faceCondXP) ||
+            !prevFaceCondYP.contentEquals(state.faceCondYP) ||
+            !prevFaceCondZP.contentEquals(state.faceCondZP)
+        ) {
+            state.geometryRevision++
+        }
+
+        state.appliedGeometryGeneration = result.generation
+        state.geometryLastComputeNanos = result.computeNanos
+        state.geometryComputeCount++
+        state.dirty = false
+    }
+
+    private fun tryApplyCompletedGeometryJob(
+        state: ShipPocketState,
+        minX: Int,
+        minY: Int,
+        minZ: Int,
+        sizeX: Int,
+        sizeY: Int,
+        sizeZ: Int,
+    ): Boolean {
+        val future = state.pendingGeometryFuture ?: return false
+        if (!future.isDone) return false
+
+        state.pendingGeometryFuture = null
+        state.geometryJobInFlight = false
+
+        val result = try {
+            future.join()
+        } catch (t: Throwable) {
+            val root = t.cause ?: t
+            val count = geometryJobsFailed.incrementAndGet()
+            logThrottledDiag(count, "Ship pocket geometry job failed", root)
+            state.dirty = true
+            return false
+        }
+
+        if (result.generation != state.requestedGeometryGeneration ||
+            result.invalidationStamp != state.geometryInvalidationStamp ||
+            result.minX != minX ||
+            result.minY != minY ||
+            result.minZ != minZ ||
+            result.sizeX != sizeX ||
+            result.sizeY != sizeY ||
+            result.sizeZ != sizeZ
+        ) {
+            val count = geometryJobsDiscarded.incrementAndGet()
+            logThrottledDiag(
+                count,
+                "Discarded stale ship pocket geometry result gen={} currentGen={} invalidation={} currentInvalidation={}",
+                result.generation,
+                state.requestedGeometryGeneration,
+                result.invalidationStamp,
+                state.geometryInvalidationStamp,
+            )
+            state.dirty = true
+            return false
+        }
+
+        applyGeometryResult(state, result)
+        geometryComputeNanosTotal.addAndGet(result.computeNanos)
+        val completed = geometryJobsCompleted.incrementAndGet()
+        val avgMs = geometryComputeNanosTotal.get().toDouble() / completed.toDouble() / 1_000_000.0
+        logThrottledDiag(
+            completed,
+            "Applied ship pocket geometry gen={} computeMs={} avgComputeMs={}",
+            result.generation,
+            result.computeNanos.toDouble() / 1_000_000.0,
+            avgMs,
+        )
+        return true
+    }
+
     @JvmStatic
     fun tickServerLevel(level: ServerLevel) {
         if (!ValkyrienAirConfig.enableShipWaterPockets) return
 
         val states = serverStates.computeIfAbsent(level.dimensionId) { ConcurrentHashMap() }
         val loadedShipIds = LongOpenHashSet()
+        var remainingGeometrySubmissions = GEOMETRY_ASYNC_SUBMISSIONS_PER_LEVEL_PER_TICK
 
         level.shipObjectWorld.loadedShips.forEach { ship ->
             loadedShipIds.add(ship.id)
@@ -242,11 +472,24 @@ object ShipWaterPocketManager {
                     log.warn("Skipping ship water pockets for ship {} (volume={}, max={})", ship.id, volume, MAX_SIM_VOLUME)
                     state.dirty = false
                 }
+                state.pendingGeometryFuture?.cancel(true)
+                state.pendingGeometryFuture = null
+                state.geometryJobInFlight = false
+                clearFloodWriteQueues(state)
                 return@forEach
             }
 
-            val needsRecompute = state.dirty || state.sizeX != sizeX || state.sizeY != sizeY || state.sizeZ != sizeZ ||
-                state.minX != minX || state.minY != minY || state.minZ != minZ
+            val geometryApplied = tryApplyCompletedGeometryJob(
+                state = state,
+                minX = minX,
+                minY = minY,
+                minZ = minZ,
+                sizeX = sizeX,
+                sizeY = sizeY,
+                sizeZ = sizeZ,
+            )
+
+            var needsRecompute = state.dirty || boundsMismatch(state, minX, minY, minZ, sizeX, sizeY, sizeZ)
             if (needsRecompute) {
                 // When (re)loading a ship, the shipyard chunks can arrive a few ticks after the ship object itself.
                 // If we recompute while those chunks are still unloaded, `getBlockState` returns air everywhere, which
@@ -254,41 +497,95 @@ object ShipWaterPocketManager {
                 // update marks the ship dirty again.
                 if (!areShipyardChunksLoaded(level, baseMinX, baseMinY, baseMinZ, baseSizeX, baseSizeY, baseSizeZ)) {
                     state.dirty = true
-                } else {
-                    recomputeState(level, ship, state, minX, minY, minZ, sizeX, sizeY, sizeZ)
+                } else if (remainingGeometrySubmissions > 0 &&
+                    trySubmitGeometryJob(level, state, minX, minY, minZ, sizeX, sizeY, sizeZ)
+                ) {
+                    remainingGeometrySubmissions--
                 }
             }
 
-	            val now = level.gameTime
-	            val shipTransform = getQueryTransform(ship)
+            val now = level.gameTime
+            val shipTransform = getQueryTransform(ship)
 
-                // If ship rotation changes the discrete shipyard "down" direction, wake up any fluids that are
-                // sitting still in the shipyard so they can reflow under the new gravity.
-                val gravityDown = computeShipGravityDownDir(shipTransform)
-                val lastGravity = state.lastGravityDownDir
-                if (lastGravity == null) {
-                    state.lastGravityDownDir = gravityDown
-                } else if (lastGravity != gravityDown) {
-                    state.lastGravityDownDir = gravityDown
-                    state.pendingGravityResettleNextIdx = 0
-                }
-                tickGravityResettle(level, state)
+            // If ship rotation changes the discrete shipyard "down" direction, wake up any fluids that are
+            // sitting still in the shipyard so they can reflow under the new gravity.
+            val gravityDown = computeShipGravityDownDir(shipTransform)
+            val lastGravity = state.lastGravityDownDir
+            if (lastGravity == null) {
+                state.lastGravityDownDir = gravityDown
+            } else if (lastGravity != gravityDown) {
+                state.lastGravityDownDir = gravityDown
+                state.pendingGravityResettleNextIdx = 0
+            }
+            tickGravityResettle(level, state)
 
-	            if (needsRecompute || now != state.lastWaterReachableUpdateTick) {
-	                state.waterReachable = computeWaterReachable(level, state, shipTransform)
-	                state.lastWaterReachableUpdateTick = now
-	                updateVsBuoyancyFromPockets(ship, state)
+            if ((geometryApplied || now != state.lastWaterReachableUpdateTick) &&
+                state.sizeX > 0 &&
+                state.sizeY > 0 &&
+                state.sizeZ > 0
+            ) {
+                state.waterReachable = computeWaterReachable(level, state, shipTransform)
+                state.lastWaterReachableUpdateTick = now
+                updateVsBuoyancyFromPockets(ship, state)
             }
             cleanupLeakedShipyardWater(level, state)
-            if (needsRecompute || now - state.lastFloodUpdateTick >= FLOOD_UPDATE_INTERVAL_TICKS) {
+            needsRecompute = state.dirty || boundsMismatch(state, minX, minY, minZ, sizeX, sizeY, sizeZ)
+            if ((geometryApplied || needsRecompute || now - state.lastFloodUpdateTick >= FLOOD_UPDATE_INTERVAL_TICKS) &&
+                state.sizeX > 0 &&
+                state.sizeY > 0 &&
+                state.sizeZ > 0
+            ) {
                 updateFlooding(level, state, shipTransform)
                 state.lastFloodUpdateTick = now
+            }
+
+            val flushResult = flushFloodWriteQueue(
+                level = level,
+                state = state,
+                shipTransform = shipTransform,
+                setApplyingInternalUpdates = { applyingInternalUpdates = it },
+                isFloodFluidType = { fluid -> canonicalFloodSource(fluid) == state.floodFluid },
+                isIngressQualifiedForAdd = { pos, transform, shipPosTmp, worldPosTmp, worldBlockPos ->
+                    val submergedSample = getShipCellFluidCoverage(
+                        level = level,
+                        shipTransform = transform,
+                        shipBlockPos = pos,
+                        shipPosTmp = shipPosTmp,
+                        worldPosTmp = worldPosTmp,
+                        worldBlockPos = worldBlockPos,
+                    )
+                    val submergedFluid = submergedSample.canonicalFluid
+                    submergedSample.isIngressQualified() &&
+                        submergedFluid != null &&
+                        canonicalFloodSource(submergedFluid) == state.floodFluid
+                },
+            )
+            if (flushResult.remainingQueued > 0) {
+                while (true) {
+                    val prev = floodQueueBacklogHighWater.get()
+                    val nowBacklog = flushResult.remainingQueued.toLong()
+                    if (nowBacklog <= prev) break
+                    if (floodQueueBacklogHighWater.compareAndSet(prev, nowBacklog)) {
+                        logThrottledDiag(
+                            nowBacklog,
+                            "New ship flood queue high-water backlog={}",
+                            nowBacklog,
+                        )
+                        break
+                    }
+                }
             }
         }
 
         // Cleanup unloaded ships
-        states.keys.removeIf { !loadedShipIds.contains(it) }
-	    }
+        states.entries.removeIf { entry ->
+            if (loadedShipIds.contains(entry.key)) return@removeIf false
+            entry.value.pendingGeometryFuture?.cancel(true)
+            entry.value.pendingGeometryFuture = null
+            entry.value.geometryJobInFlight = false
+            true
+        }
+    }
 
     private fun computeShipGravityDownDir(shipTransform: ShipTransform): Direction {
         val rot = shipTransform.shipToWorldRotation
@@ -407,6 +704,7 @@ object ShipWaterPocketManager {
 
         val states = clientStates.computeIfAbsent(level.dimensionId) { ConcurrentHashMap() }
         val loadedShipIds = LongOpenHashSet()
+        var remainingGeometrySubmissions = GEOMETRY_ASYNC_SUBMISSIONS_PER_LEVEL_PER_TICK
 
         level.shipObjectWorld.loadedShips.forEach { ship ->
             loadedShipIds.add(ship.id)
@@ -429,12 +727,24 @@ object ShipWaterPocketManager {
             val volume = sizeX.toLong() * sizeY.toLong() * sizeZ.toLong()
             if (volume <= 0 || volume > MAX_SIM_VOLUME.toLong()) {
                 state.dirty = false
+                state.pendingGeometryFuture?.cancel(true)
+                state.pendingGeometryFuture = null
+                state.geometryJobInFlight = false
+                clearFloodWriteQueues(state)
                 return@forEach
             }
 
+            val geometryApplied = tryApplyCompletedGeometryJob(
+                state = state,
+                minX = minX,
+                minY = minY,
+                minZ = minZ,
+                sizeX = sizeX,
+                sizeY = sizeY,
+                sizeZ = sizeZ,
+            )
             val needsRecompute =
-                state.dirty || state.sizeX != sizeX || state.sizeY != sizeY || state.sizeZ != sizeZ ||
-                    state.minX != minX || state.minY != minY || state.minZ != minZ
+                state.dirty || boundsMismatch(state, minX, minY, minZ, sizeX, sizeY, sizeZ)
             if (needsRecompute) {
                 // When (re)loading a ship, the shipyard chunks can arrive a few ticks after the ship object itself.
                 // If we recompute while those chunks are still unloaded, `getBlockState` returns air everywhere, which
@@ -442,14 +752,20 @@ object ShipWaterPocketManager {
                 // update marks the ship dirty again.
                 if (!areShipyardChunksLoaded(level, baseMinX, baseMinY, baseMinZ, baseSizeX, baseSizeY, baseSizeZ)) {
                     state.dirty = true
-                } else {
-                    recomputeState(level, ship, state, minX, minY, minZ, sizeX, sizeY, sizeZ)
+                } else if (remainingGeometrySubmissions > 0 &&
+                    trySubmitGeometryJob(level, state, minX, minY, minZ, sizeX, sizeY, sizeZ)
+                ) {
+                    remainingGeometrySubmissions--
                 }
             }
 
             val now = level.gameTime
             val shipTransform = getQueryTransform(ship)
-            if (now != state.lastWaterReachableUpdateTick) {
+            if ((geometryApplied || now != state.lastWaterReachableUpdateTick) &&
+                state.sizeX > 0 &&
+                state.sizeY > 0 &&
+                state.sizeZ > 0
+            ) {
                 state.waterReachable = computeWaterReachable(level, state, shipTransform)
                 state.lastWaterReachableUpdateTick = now
             }
@@ -457,7 +773,13 @@ object ShipWaterPocketManager {
             spawnLeakParticlesClient(level, state, shipTransform)
         }
 
-        states.keys.removeIf { !loadedShipIds.contains(it) }
+        states.entries.removeIf { entry ->
+            if (loadedShipIds.contains(entry.key)) return@removeIf false
+            entry.value.pendingGeometryFuture?.cancel(true)
+            entry.value.pendingGeometryFuture = null
+            entry.value.geometryJobInFlight = false
+            true
+        }
     }
 
     private fun leakParticleForFluid(fluid: Fluid): ParticleOptions {
@@ -902,16 +1224,17 @@ object ShipWaterPocketManager {
             if (!shipFluid.isEmpty) return shipFluid
             shipBlockPosTmp.set(baseX, baseY, baseZ)
 
-            val inAirPocket = if (!original.isEmpty) {
-                findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
+            val suppressWorldFluid = if (!original.isEmpty) {
+                findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
             } else {
                 false
             }
             shipBlockPosTmp.set(baseX, baseY, baseZ)
 
-            if (inAirPocket) {
-                // We are inside a sealed ship air pocket; treat world fluid as air.
-                return shipFluid
+            if (suppressWorldFluid) {
+                val count = worldSuppressionHits.incrementAndGet()
+                logThrottledDiag(count, "Suppressed world fluid query in ship interior suppression zone")
+                return Fluids.EMPTY.defaultFluidState()
             }
         }
 
@@ -962,16 +1285,17 @@ object ShipWaterPocketManager {
             if (!shipFluid.isEmpty) return shipFluid
             shipBlockPosTmp.set(baseX, baseY, baseZ)
 
-            val inAirPocket = if (!original.isEmpty) {
-                findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
+            val suppressWorldFluid = if (!original.isEmpty) {
+                findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
             } else {
                 false
             }
             shipBlockPosTmp.set(baseX, baseY, baseZ)
 
-            if (inAirPocket) {
-                // We are inside a sealed ship air pocket; treat world fluid as air.
-                return shipFluid
+            if (suppressWorldFluid) {
+                val count = worldSuppressionHits.incrementAndGet()
+                logThrottledDiag(count, "Suppressed world fluid query in ship interior suppression zone")
+                return Fluids.EMPTY.defaultFluidState()
             }
         }
 
@@ -1068,6 +1392,54 @@ object ShipWaterPocketManager {
     @JvmStatic
     fun computeShipFluidHeight(level: Level, worldBlockPos: BlockPos): Float? {
         return computeShipFluidSample(level, worldBlockPos).height
+    }
+
+    @JvmStatic
+    fun isWorldPosInShipWorldFluidSuppressionZone(level: Level, worldBlockPos: BlockPos): Boolean {
+        return isWorldPosInShipWorldFluidSuppressionZone(
+            level = level,
+            worldX = worldBlockPos.x + 0.5,
+            worldY = worldBlockPos.y + 0.5,
+            worldZ = worldBlockPos.z + 0.5,
+        )
+    }
+
+    @JvmStatic
+    fun isWorldPosInShipWorldFluidSuppressionZone(level: Level, worldX: Double, worldY: Double, worldZ: Double): Boolean {
+        if (!ValkyrienAirConfig.enableShipWaterPockets) return false
+        if (level.isBlockInShipyard(worldX, worldY, worldZ)) return false
+
+        val worldBlockPos = BlockPos.containing(worldX, worldY, worldZ)
+        val queryAabb = tmpQueryAabb.get().apply {
+            minX = worldBlockPos.x.toDouble()
+            minY = worldBlockPos.y.toDouble()
+            minZ = worldBlockPos.z.toDouble()
+            maxX = (worldBlockPos.x + 1).toDouble()
+            maxY = (worldBlockPos.y + 1).toDouble()
+            maxZ = (worldBlockPos.z + 1).toDouble()
+        }
+        val worldPos = tmpWorldPos.get().set(worldX, worldY, worldZ)
+        val shipPosTmp = tmpShipPos.get()
+        val shipBlockPosTmp = tmpShipBlockPos.get()
+
+        for (ship in level.shipObjectWorld.loadedShips.getIntersecting(queryAabb, level.dimensionId)) {
+            val state = getState(level, ship.id) ?: continue
+            val shipTransform = getQueryTransform(ship)
+
+            shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
+            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
+
+            if (!isOpen(state, shipBlockPosTmp)) {
+                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
+                shipBlockPosTmp.set(openPos)
+            }
+
+            if (findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /**
@@ -1185,154 +1557,6 @@ object ShipWaterPocketManager {
         return if (fluid is FlowingFluid) fluid.source else fluid
     }
 
-    private fun recomputeState(
-        level: Level,
-        ship: LoadedShip,
-        state: ShipPocketState,
-        minX: Int,
-        minY: Int,
-        minZ: Int,
-        sizeX: Int,
-        sizeY: Int,
-        sizeZ: Int,
-    ) {
-        val boundsChanged =
-            state.minX != minX || state.minY != minY || state.minZ != minZ ||
-                state.sizeX != sizeX || state.sizeY != sizeY || state.sizeZ != sizeZ
-        val prevOpen = state.open
-        val prevFaceCondXP = state.faceCondXP
-        val prevFaceCondYP = state.faceCondYP
-        val prevFaceCondZP = state.faceCondZP
-
-        state.minX = minX
-        state.minY = minY
-        state.minZ = minZ
-        state.sizeX = sizeX
-        state.sizeY = sizeY
-        state.sizeZ = sizeZ
-
-        val volume = sizeX * sizeY * sizeZ
-        val open = BitSet(volume)
-        val flooded = BitSet(volume)
-        val materialized = BitSet(volume)
-        val faceCondXP = ShortArray(volume)
-        val faceCondYP = ShortArray(volume)
-        val faceCondZP = ShortArray(volume)
-        val geometryByIdx = arrayOfNulls<ShapeWaterGeometry>(volume)
-
-        val pos = BlockPos.MutableBlockPos()
-
-        var idx = 0
-        for (z in 0 until sizeZ) {
-            for (y in 0 until sizeY) {
-                for (x in 0 until sizeX) {
-                    pos.set(minX + x, minY + y, minZ + z)
-                    val bs = level.getBlockState(pos)
-                    val geom = computeShapeWaterGeometry(level, pos, bs)
-                    geometryByIdx[idx] = geom
-
-                    if (!geom.fullSolid && hasOpenVolume(geom)) {
-                        open.set(idx)
-                    }
-
-                    val fluidState = bs.fluidState
-                    if (!fluidState.isEmpty && canonicalFloodSource(fluidState.type) == state.floodFluid) {
-                        flooded.set(idx)
-                        if (bs.block is LiquidBlock) {
-                            materialized.set(idx)
-                        }
-                    }
-
-                    idx++
-                }
-            }
-        }
-
-        val strideY = sizeX
-        val strideZ = sizeX * sizeY
-
-        idx = 0
-        for (z in 0 until sizeZ) {
-            for (y in 0 until sizeY) {
-                for (x in 0 until sizeX) {
-                    if (!open.get(idx)) {
-                        idx++
-                        continue
-                    }
-
-                    if (x + 1 < sizeX) {
-                        val n = idx + 1
-                        if (open.get(n)) {
-                            val cond = computeFaceConductance(
-                                geometryByIdx[idx]!!,
-                                geometryByIdx[n]!!,
-                                axis = 0
-                            )
-                            faceCondXP[idx] = cond.toShort()
-                        }
-                    }
-                    if (y + 1 < sizeY) {
-                        val n = idx + strideY
-                        if (open.get(n)) {
-                            val cond = computeFaceConductance(
-                                geometryByIdx[idx]!!,
-                                geometryByIdx[n]!!,
-                                axis = 1
-                            )
-                            faceCondYP[idx] = cond.toShort()
-                        }
-                    }
-                    if (z + 1 < sizeZ) {
-                        val n = idx + strideZ
-                        if (open.get(n)) {
-                            val cond = computeFaceConductance(
-                                geometryByIdx[idx]!!,
-                                geometryByIdx[n]!!,
-                                axis = 2
-                            )
-                            faceCondZP[idx] = cond.toShort()
-                        }
-                    }
-
-                    idx++
-                }
-            }
-        }
-
-        state.open = open
-        state.faceCondXP = faceCondXP
-        state.faceCondYP = faceCondYP
-        state.faceCondZP = faceCondZP
-
-        // Keep trapped-air support by combining strict shape connectivity with enclosure heuristics.
-        val strictExterior = floodFillFromBoundaryGraph(open, sizeX, sizeY, sizeZ) { idxCur, lx, ly, lz, dir ->
-            edgeConductance(state, idxCur, lx, ly, lz, dir)
-        }
-        val strictInterior = open.clone() as BitSet
-        strictInterior.andNot(strictExterior)
-        val heuristicInterior = computeInteriorMaskHeuristic(open, sizeX, sizeY, sizeZ)
-        strictInterior.or(heuristicInterior)
-
-        state.exterior = strictExterior
-        state.interior = strictInterior
-        state.waterReachable = BitSet(volume)
-        state.unreachableVoid = open.clone() as BitSet
-        state.flooded = flooded
-        state.materializedWater = materialized
-        state.floodPlaneByComponent.clear()
-
-        state.dirty = false
-        if (
-            boundsChanged ||
-            prevOpen != open ||
-            !prevFaceCondXP.contentEquals(faceCondXP) ||
-            !prevFaceCondYP.contentEquals(faceCondYP) ||
-            !prevFaceCondZP.contentEquals(faceCondZP)
-        ) {
-            state.geometryRevision++
-        }
-    }
-
     private fun computeWaterReachableWithPressure(
         level: Level,
         minX: Int,
@@ -1382,13 +1606,19 @@ object ShipWaterPocketManager {
         val submerged = tmpPressureSubmerged.get()
         submerged.clear()
 
-        val worldPosTmp = Vector3d()
-        val shipPosTmp = Vector3d()
-        val shipBlockPos = BlockPos.MutableBlockPos()
+        val worldPosTmp = tmpWorldPos.get()
+        val shipPosTmp = tmpShipPos.get()
+        val shipBlockPos = tmpShipBlockPos.get()
         val worldBlockPos = BlockPos.MutableBlockPos()
         val worldScanPos = BlockPos.MutableBlockPos()
 
-        val submergedCoverage = DoubleArray(volume)
+        var submergedCoverage = tmpSubmergedCoverage.get()
+        if (submergedCoverage.size < volume) {
+            submergedCoverage = DoubleArray(volume)
+            tmpSubmergedCoverage.set(submergedCoverage)
+        } else {
+            java.util.Arrays.fill(submergedCoverage, 0, volume, 0.0)
+        }
         val floodFluidScores = HashMap<Fluid, Double>()
 
         fun shipCellFluidCoverage(idx: Int): FluidCoverageSample {
@@ -1972,8 +2202,8 @@ object ShipWaterPocketManager {
                 val baseShipY = state.minY.toDouble()
                 val baseShipZ = state.minZ.toDouble()
 
-                val shipPosTmp = Vector3d()
-                val worldPosTmp = Vector3d()
+                val shipPosTmp = tmpShipPos2.get()
+                val worldPosTmp = tmpWorldPos2.get()
 
                 shipPosTmp.set(baseShipX, baseShipY, baseShipZ)
                 shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
@@ -2105,12 +2335,7 @@ object ShipWaterPocketManager {
 
         state.floodPlaneByComponent = newPlanes
 
-        if (!toAddAll.isEmpty) {
-            applyBlockChanges(level, state, toAddAll, toWater = true, pos = BlockPos.MutableBlockPos(), shipTransform = shipTransform)
-        }
-        if (!toRemoveAll.isEmpty) {
-            applyBlockChanges(level, state, toRemoveAll, toWater = false, pos = BlockPos.MutableBlockPos())
-        }
+        enqueueFloodWriteDiffs(state, toAddAll, toRemoveAll)
     }
 
     private fun drainFloodedInteriorToOutsideAir(
@@ -2143,8 +2368,8 @@ object ShipWaterPocketManager {
         val baseShipY = state.minY.toDouble()
         val baseShipZ = state.minZ.toDouble()
 
-        val shipPosTmp = Vector3d()
-        val worldPosTmp = Vector3d()
+        val shipPosTmp = tmpShipPos2.get()
+        val worldPosTmp = tmpWorldPos2.get()
 
         shipPosTmp.set(baseShipX, baseShipY, baseShipZ)
         shipTransform.shipToWorld.transformPosition(shipPosTmp, worldPosTmp)
@@ -2194,8 +2419,8 @@ object ShipWaterPocketManager {
         }
 
         val shipBlockPos = BlockPos.MutableBlockPos()
-        val shipPosCornerTmp = Vector3d()
-        val worldPosCornerTmp = Vector3d()
+        val shipPosCornerTmp = tmpShipPos3.get()
+        val worldPosCornerTmp = tmpWorldPos3.get()
         val worldBlockPos = BlockPos.MutableBlockPos()
         var drainParticleBudget = 2
         fun spawnDrainParticles(ventIdx: Int, outDirCode: Int, conductance: Int) {
@@ -2415,8 +2640,8 @@ object ShipWaterPocketManager {
         var head = 0
         var tail = 0
 
-        val worldPosTmp = Vector3d()
-        val shipPosTmp = Vector3d()
+        val worldPosTmp = tmpWorldPos2.get()
+        val shipPosTmp = tmpShipPos2.get()
         val shipBlockPos = BlockPos.MutableBlockPos()
         val worldBlockPos = BlockPos.MutableBlockPos()
 
@@ -2475,8 +2700,8 @@ object ShipWaterPocketManager {
         val flags = 11 // 1 (block update) + 2 (send to clients) + 8 (force rerender)
         val sourceBlockState = state.floodFluid.defaultFluidState().createLegacyBlock()
 
-        val worldPosTmp = Vector3d()
-        val shipPosTmp = Vector3d()
+        val worldPosTmp = tmpWorldPos2.get()
+        val shipPosTmp = tmpShipPos2.get()
         val worldBlockPos = BlockPos.MutableBlockPos()
 
         applyingInternalUpdates = true
@@ -2556,7 +2781,9 @@ object ShipWaterPocketManager {
         return withBypassedFluidOverrides {
             val epsCorner = 1e-4
             val epsY = 1e-5
-            val sampleCounts = HashMap<Fluid, Int>()
+            val sampledFluids = arrayOfNulls<Fluid>(9)
+            val sampledFluidCounts = IntArray(9)
+            var sampledFluidCount = 0
             var centerCanonical: Fluid? = null
             var centerSubmerged = false
             var submergedSamples = 0
@@ -2582,7 +2809,20 @@ object ShipWaterPocketManager {
             fun registerSample(fluid: Fluid?) {
                 if (fluid == null) return
                 submergedSamples++
-                sampleCounts[fluid] = (sampleCounts[fluid] ?: 0) + 1
+                for (i in 0 until sampledFluidCount) {
+                    if (sampledFluids[i] == fluid) {
+                        sampledFluidCounts[i]++
+                        return
+                    }
+                }
+                if (sampledFluidCount < sampledFluids.size) {
+                    sampledFluids[sampledFluidCount] = fluid
+                    sampledFluidCounts[sampledFluidCount] = 1
+                    sampledFluidCount++
+                } else {
+                    // Should never happen (9 samples max), but keep deterministic behavior.
+                    sampledFluidCounts[0]++
+                }
             }
 
             val x0 = shipBlockPos.x.toDouble()
@@ -2615,7 +2855,9 @@ object ShipWaterPocketManager {
 
             var bestFluid: Fluid? = null
             var bestCount = 0
-            for ((fluid, count) in sampleCounts) {
+            for (i in 0 until sampledFluidCount) {
+                val fluid = sampledFluids[i] ?: continue
+                val count = sampledFluidCounts[i]
                 if (count > bestCount) {
                     bestCount = count
                     bestFluid = fluid

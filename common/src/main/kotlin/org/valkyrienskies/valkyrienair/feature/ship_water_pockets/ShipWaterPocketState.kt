@@ -5,6 +5,7 @@ import net.minecraft.core.Direction
 import net.minecraft.world.level.material.Fluid
 import net.minecraft.world.level.material.Fluids
 import java.util.BitSet
+import java.util.concurrent.CompletableFuture
 
 internal data class ShipPocketState(
     var minX: Int = 0,
@@ -28,6 +29,17 @@ internal data class ShipPocketState(
     var buoyancy: BuoyancyMetrics = BuoyancyMetrics(),
     var floodPlaneByComponent: Int2DoubleOpenHashMap = Int2DoubleOpenHashMap(),
     var geometryRevision: Long = 0,
+    var geometryInvalidationStamp: Long = 0,
+    var pendingGeometryFuture: CompletableFuture<GeometryAsyncResult>? = null,
+    var requestedGeometryGeneration: Long = 0,
+    var appliedGeometryGeneration: Long = 0,
+    var geometryJobInFlight: Boolean = false,
+    var geometryLastComputeNanos: Long = 0,
+    var geometryComputeCount: Long = 0,
+    var queuedFloodAdds: BitSet = BitSet(),
+    var queuedFloodRemoves: BitSet = BitSet(),
+    var nextQueuedAddIdx: Int = 0,
+    var nextQueuedRemoveIdx: Int = 0,
     var dirty: Boolean = true,
     var lastFloodUpdateTick: Long = Long.MIN_VALUE,
     var lastWaterReachableUpdateTick: Long = Long.MIN_VALUE,
