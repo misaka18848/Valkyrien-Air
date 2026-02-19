@@ -17,11 +17,253 @@ private const val GEOMETRY_FACE_SAMPLES_BASE = 8
 private const val GEOMETRY_FACE_SAMPLES_REFINED = 16
 private const val GEOMETRY_SAMPLE_EPS = 1e-4
 
+internal const val SHAPE_SUBCELL_RES = 8
+internal const val SHAPE_SUBCELL_COUNT = SHAPE_SUBCELL_RES * SHAPE_SUBCELL_RES * SHAPE_SUBCELL_RES
+internal const val SHAPE_FACE_SAMPLE_RES = SHAPE_SUBCELL_RES
+internal const val SHAPE_FACE_SAMPLE_COUNT = SHAPE_FACE_SAMPLE_RES * SHAPE_FACE_SAMPLE_RES
+internal const val SHAPE_MAX_COMPONENTS = 64
+
+internal const val SHAPE_FACE_NEG_X = 0
+internal const val SHAPE_FACE_POS_X = 1
+internal const val SHAPE_FACE_NEG_Y = 2
+internal const val SHAPE_FACE_POS_Y = 3
+internal const val SHAPE_FACE_NEG_Z = 4
+internal const val SHAPE_FACE_POS_Z = 5
+
+private const val SHAPE_COMPONENT_SOLID: Byte = -1
+private const val SHAPE_COMPONENT_UNASSIGNED: Byte = -2
+
 internal data class ShapeWaterGeometry(
     val fullSolid: Boolean,
     val refined: Boolean,
     val boxes: List<AABB>,
 )
+
+internal data class ShapeCellTemplate(
+    // Bit=1 means solid, bit=0 means void.
+    val occupancyMask: LongArray,
+    // Per subcell local component id (0..63), -1 for solid.
+    val componentBySubcell: ByteArray,
+    val componentCount: Int,
+    // For each face, which local components are open on that face.
+    val faceComponentMask: LongArray,
+    // Number of open face samples (0..64) per face.
+    val faceOpenCount: IntArray,
+    // Per face sample local component id (0..63), -1 for solid.
+    val faceSampleComponent: ByteArray,
+) {
+    val hasOpenVolume: Boolean
+        get() = componentCount > 0
+}
+
+internal fun fullComponentMask(componentCount: Int): Long {
+    return when {
+        componentCount <= 0 -> 0L
+        componentCount >= 64 -> -1L
+        else -> (1L shl componentCount) - 1L
+    }
+}
+
+private fun subcellIndex(sx: Int, sy: Int, sz: Int): Int {
+    return sx + SHAPE_SUBCELL_RES * (sy + SHAPE_SUBCELL_RES * sz)
+}
+
+private fun subcellSolid(occupancyMask: LongArray, subIdx: Int): Boolean {
+    val word = subIdx ushr 6
+    val bit = subIdx and 63
+    return ((occupancyMask[word] ushr bit) and 1L) != 0L
+}
+
+private fun setSubcellSolid(occupancyMask: LongArray, subIdx: Int) {
+    val word = subIdx ushr 6
+    val bit = subIdx and 63
+    occupancyMask[word] = occupancyMask[word] or (1L shl bit)
+}
+
+private fun faceSampleSubcellIndex(face: Int, sampleIdx: Int): Int {
+    val u = sampleIdx and (SHAPE_FACE_SAMPLE_RES - 1)
+    val v = sampleIdx ushr 3
+    return when (face) {
+        SHAPE_FACE_NEG_X -> subcellIndex(0, u, v)
+        SHAPE_FACE_POS_X -> subcellIndex(SHAPE_SUBCELL_RES - 1, u, v)
+        SHAPE_FACE_NEG_Y -> subcellIndex(u, 0, v)
+        SHAPE_FACE_POS_Y -> subcellIndex(u, SHAPE_SUBCELL_RES - 1, v)
+        SHAPE_FACE_NEG_Z -> subcellIndex(u, v, 0)
+        else -> subcellIndex(u, v, SHAPE_SUBCELL_RES - 1)
+    }
+}
+
+private fun faceForDirCode(dirCode: Int): Int {
+    return when (dirCode) {
+        0 -> SHAPE_FACE_NEG_X
+        1 -> SHAPE_FACE_POS_X
+        2 -> SHAPE_FACE_NEG_Y
+        3 -> SHAPE_FACE_POS_Y
+        4 -> SHAPE_FACE_NEG_Z
+        else -> SHAPE_FACE_POS_Z
+    }
+}
+
+private fun oppositeFace(face: Int): Int {
+    return when (face) {
+        SHAPE_FACE_NEG_X -> SHAPE_FACE_POS_X
+        SHAPE_FACE_POS_X -> SHAPE_FACE_NEG_X
+        SHAPE_FACE_NEG_Y -> SHAPE_FACE_POS_Y
+        SHAPE_FACE_POS_Y -> SHAPE_FACE_NEG_Y
+        SHAPE_FACE_NEG_Z -> SHAPE_FACE_POS_Z
+        else -> SHAPE_FACE_NEG_Z
+    }
+}
+
+internal fun buildShapeCellTemplate(geom: ShapeWaterGeometry): ShapeCellTemplate {
+    val occupancyMask = LongArray((SHAPE_SUBCELL_COUNT + 63) ushr 6)
+    val componentBySubcell = ByteArray(SHAPE_SUBCELL_COUNT) { SHAPE_COMPONENT_UNASSIGNED }
+
+    var hasOpen = false
+    for (sz in 0 until SHAPE_SUBCELL_RES) {
+        val z = (sz + 0.5) / SHAPE_SUBCELL_RES.toDouble()
+        for (sy in 0 until SHAPE_SUBCELL_RES) {
+            val y = (sy + 0.5) / SHAPE_SUBCELL_RES.toDouble()
+            for (sx in 0 until SHAPE_SUBCELL_RES) {
+                val x = (sx + 0.5) / SHAPE_SUBCELL_RES.toDouble()
+                val subIdx = subcellIndex(sx, sy, sz)
+                if (isSolidAt(geom, x, y, z)) {
+                    componentBySubcell[subIdx] = SHAPE_COMPONENT_SOLID
+                    setSubcellSolid(occupancyMask, subIdx)
+                } else {
+                    hasOpen = true
+                }
+            }
+        }
+    }
+
+    var componentCount = 0
+    if (hasOpen) {
+        val queue = IntArray(SHAPE_SUBCELL_COUNT)
+        for (start in 0 until SHAPE_SUBCELL_COUNT) {
+            if (subcellSolid(occupancyMask, start)) continue
+            if (componentBySubcell[start] != SHAPE_COMPONENT_UNASSIGNED) continue
+
+            val componentId = if (componentCount < SHAPE_MAX_COMPONENTS) componentCount else SHAPE_MAX_COMPONENTS - 1
+            if (componentCount < SHAPE_MAX_COMPONENTS) {
+                componentCount++
+            }
+
+            var head = 0
+            var tail = 0
+            queue[tail++] = start
+            componentBySubcell[start] = componentId.toByte()
+
+            while (head < tail) {
+                val cur = queue[head++]
+                val cx = cur and 7
+                val ct = cur ushr 3
+                val cy = ct and 7
+                val cz = ct ushr 3
+
+                fun tryNeighbor(nx: Int, ny: Int, nz: Int) {
+                    if (nx !in 0 until SHAPE_SUBCELL_RES ||
+                        ny !in 0 until SHAPE_SUBCELL_RES ||
+                        nz !in 0 until SHAPE_SUBCELL_RES
+                    ) {
+                        return
+                    }
+                    val n = subcellIndex(nx, ny, nz)
+                    if (subcellSolid(occupancyMask, n)) return
+                    if (componentBySubcell[n] != SHAPE_COMPONENT_UNASSIGNED) return
+                    componentBySubcell[n] = componentId.toByte()
+                    queue[tail++] = n
+                }
+
+                tryNeighbor(cx - 1, cy, cz)
+                tryNeighbor(cx + 1, cy, cz)
+                tryNeighbor(cx, cy - 1, cz)
+                tryNeighbor(cx, cy + 1, cz)
+                tryNeighbor(cx, cy, cz - 1)
+                tryNeighbor(cx, cy, cz + 1)
+            }
+        }
+    }
+
+    val faceComponentMask = LongArray(6)
+    val faceOpenCount = IntArray(6)
+    val faceSampleComponent = ByteArray(6 * SHAPE_FACE_SAMPLE_COUNT) { SHAPE_COMPONENT_SOLID }
+
+    for (face in 0 until 6) {
+        val faceOffset = face * SHAPE_FACE_SAMPLE_COUNT
+        for (sampleIdx in 0 until SHAPE_FACE_SAMPLE_COUNT) {
+            val subIdx = faceSampleSubcellIndex(face, sampleIdx)
+            val component = componentBySubcell[subIdx].toInt()
+            faceSampleComponent[faceOffset + sampleIdx] = component.toByte()
+            if (component >= 0) {
+                faceOpenCount[face]++
+                faceComponentMask[face] = faceComponentMask[face] or (1L shl component)
+            }
+        }
+    }
+
+    return ShapeCellTemplate(
+        occupancyMask = occupancyMask,
+        componentBySubcell = componentBySubcell,
+        componentCount = componentCount,
+        faceComponentMask = faceComponentMask,
+        faceOpenCount = faceOpenCount,
+        faceSampleComponent = faceSampleComponent,
+    )
+}
+
+internal inline fun forEachTemplateFaceConnection(
+    templateA: ShapeCellTemplate,
+    templateB: ShapeCellTemplate,
+    dirCodeFromA: Int,
+    block: (componentA: Int, componentB: Int) -> Unit,
+) {
+    val faceA = faceForDirCode(dirCodeFromA)
+    val faceB = oppositeFace(faceA)
+    val faceOffsetA = faceA * SHAPE_FACE_SAMPLE_COUNT
+    val faceOffsetB = faceB * SHAPE_FACE_SAMPLE_COUNT
+
+    for (sampleIdx in 0 until SHAPE_FACE_SAMPLE_COUNT) {
+        val componentA = templateA.faceSampleComponent[faceOffsetA + sampleIdx].toInt()
+        if (componentA < 0) continue
+        val componentB = templateB.faceSampleComponent[faceOffsetB + sampleIdx].toInt()
+        if (componentB < 0) continue
+        block(componentA, componentB)
+    }
+}
+
+internal fun computeTemplateFaceConductance(
+    templateA: ShapeCellTemplate,
+    templateB: ShapeCellTemplate,
+    dirCodeFromA: Int,
+    componentMaskA: Long = -1L,
+    componentMaskB: Long = -1L,
+): Int {
+    var count = 0
+    forEachTemplateFaceConnection(templateA, templateB, dirCodeFromA) { componentA, componentB ->
+        if (componentMaskA != -1L && ((componentMaskA ushr componentA) and 1L) == 0L) {
+            return@forEachTemplateFaceConnection
+        }
+        if (componentMaskB != -1L && ((componentMaskB ushr componentB) and 1L) == 0L) {
+            return@forEachTemplateFaceConnection
+        }
+        count++
+    }
+    return count
+}
+
+internal fun computeTemplateAxisConductance(
+    templateA: ShapeCellTemplate,
+    templateB: ShapeCellTemplate,
+    axis: Int,
+): Int {
+    val dirCode = when (axis) {
+        0 -> 1 // +X
+        1 -> 3 // +Y
+        else -> 5 // +Z
+    }
+    return computeTemplateFaceConductance(templateA, templateB, dirCode)
+}
 
 private fun isGameplaySealedState(state: BlockState): Boolean {
     val block = state.block

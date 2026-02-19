@@ -105,6 +105,11 @@ public abstract class MixinLevel {
         final Ship ship = VSGameUtilsKt.getShipManagingPos(level, pos);
         if (ship == null) return;
 
+        final FluidState placedFluid = state.getFluidState();
+        if (!placedFluid.isEmpty()) {
+            ShipWaterPocketManager.onExternalShipFluidPlacement(level, ship.getId(), pos, placedFluid.getType());
+        }
+
         ShipWaterPocketManager.markShipDirty(level, ship.getId());
     }
 

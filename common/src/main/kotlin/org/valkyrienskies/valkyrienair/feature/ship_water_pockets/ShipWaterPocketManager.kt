@@ -220,7 +220,8 @@ object ShipWaterPocketManager {
 
         val state = serverStates[level.dimensionId]?.get(shipId) ?: return false
         if (state.sizeX <= 0 || state.sizeY <= 0 || state.sizeZ <= 0) return false
-        if (state.open.isEmpty || state.interior.isEmpty) return false
+        if (state.open.isEmpty) return false
+        if (state.dirty) return false
 
         val lx = shipPos.x - state.minX
         val ly = shipPos.y - state.minY
@@ -229,13 +230,66 @@ object ShipWaterPocketManager {
         if (inBounds) {
             val idx = indexOf(state, lx, ly, lz)
             if (!state.open.get(idx)) return true
-            if (!state.interior.get(idx)) return true
-            if (state.exterior.get(idx)) return true
-            return false
+
+            val pointClass = classifyShipPoint(
+                state = state,
+                x = shipPos.x + 0.5,
+                y = shipPos.y + 0.5,
+                z = shipPos.z + 0.5,
+            )
+
+            if (pointClass.kind == PointVoidClass.SOLID || pointClass.kind == PointVoidClass.OUT_OF_BOUNDS) {
+                return true
+            }
+            if (pointClass.kind == PointVoidClass.INTERIOR_VOID) {
+                return false
+            }
+
+            // Exterior-open cells on the simulation boundary shell are outside-facing and should not accept shipyard
+            // fluid placement; non-boundary exterior-connected cells are allowed and will be drained by path/height.
+            val isBoundaryShell =
+                lx == 0 || lx + 1 == state.sizeX ||
+                    ly == 0 || ly + 1 == state.sizeY ||
+                    lz == 0 || lz + 1 == state.sizeZ
+            return isBoundaryShell
         }
 
         // Outside the sim bounds, always block; it is never part of the ship interior pocket volume.
         return true
+    }
+
+    @JvmStatic
+    fun onExternalShipFluidPlacement(
+        level: Level,
+        shipId: Long,
+        shipPos: BlockPos,
+        fluid: Fluid,
+    ) {
+        if (!ValkyrienAirConfig.enableShipWaterPockets) return
+        if (level.isClientSide) return
+        if (fluid == Fluids.EMPTY) return
+
+        val state = serverStates[level.dimensionId]?.get(shipId) ?: return
+        if (state.sizeX <= 0 || state.sizeY <= 0 || state.sizeZ <= 0) return
+
+        val lx = shipPos.x - state.minX
+        val ly = shipPos.y - state.minY
+        val lz = shipPos.z - state.minZ
+        if (lx !in 0 until state.sizeX || ly !in 0 until state.sizeY || lz !in 0 until state.sizeZ) return
+
+        val idx = indexOf(state, lx, ly, lz)
+        if (!state.open.get(idx)) return
+
+        val canonical = canonicalFloodSource(fluid)
+        if (canonical != state.floodFluid) {
+            state.floodFluid = canonical
+            state.dirty = true
+        }
+
+        state.flooded.set(idx)
+        state.materializedWater.set(idx)
+        state.queuedFloodAdds.clear(idx)
+        state.queuedFloodRemoves.clear(idx)
     }
 
     private fun logThrottledDiag(counter: Long, message: String, vararg args: Any?) {
@@ -357,6 +411,11 @@ object ShipWaterPocketManager {
         state.faceCondXP = result.faceCondXP
         state.faceCondYP = result.faceCondYP
         state.faceCondZP = result.faceCondZP
+        state.shapeTemplatePalette = result.templatePalette
+        state.templateIndexByVoxel = result.templateIndexByVoxel
+        state.voxelExteriorComponentMask = result.voxelExteriorComponentMask
+        state.voxelInteriorComponentMask = result.voxelInteriorComponentMask
+        state.componentGraphDegraded = result.componentGraphDegraded
         state.waterReachable = BitSet(result.sizeX * result.sizeY * result.sizeZ)
         state.unreachableVoid = state.open.clone() as BitSet
         state.floodPlaneByComponent.clear()
@@ -1248,62 +1307,31 @@ object ShipWaterPocketManager {
         )
     }
 
+    private fun isSuppressionClassification(state: ShipPocketState, classification: PointVoidClassification): Boolean {
+        if (classification.kind != PointVoidClass.INTERIOR_VOID) return false
+        val idx = classification.voxelIndex
+        if (idx < 0) return false
+        if (state.materializedWater.get(idx)) return false
+        return true
+    }
+
+    private fun isAirPocketClassification(state: ShipPocketState, classification: PointVoidClassification): Boolean {
+        if (classification.kind != PointVoidClass.INTERIOR_VOID) return false
+        val idx = classification.voxelIndex
+        if (idx < 0) return false
+        if (state.materializedWater.get(idx)) return false
+        return state.unreachableVoid.get(idx)
+    }
+
     @JvmStatic
     fun overrideWaterFluidState(level: Level, worldBlockPos: BlockPos, original: net.minecraft.world.level.material.FluidState): net.minecraft.world.level.material.FluidState {
-        if (!ValkyrienAirConfig.enableShipWaterPockets) return original
-        if (level.isBlockInShipyard(worldBlockPos)) return original
-
-        val queryAabb = tmpQueryAabb.get().apply {
-            minX = worldBlockPos.x.toDouble()
-            minY = worldBlockPos.y.toDouble()
-            minZ = worldBlockPos.z.toDouble()
-            maxX = (worldBlockPos.x + 1).toDouble()
-            maxY = (worldBlockPos.y + 1).toDouble()
-            maxZ = (worldBlockPos.z + 1).toDouble()
-        }
-        val worldPos = tmpWorldPos.get().set(
-            worldBlockPos.x + 0.5,
-            worldBlockPos.y + 0.5,
-            worldBlockPos.z + 0.5
+        return overrideWaterFluidState(
+            level = level,
+            worldX = worldBlockPos.x + 0.5,
+            worldY = worldBlockPos.y + 0.5,
+            worldZ = worldBlockPos.z + 0.5,
+            original = original,
         )
-        val shipPosTmp = tmpShipPos.get()
-        val shipBlockPosTmp = tmpShipBlockPos.get()
-
-        for (ship in level.shipObjectWorld.loadedShips.getIntersecting(queryAabb, level.dimensionId)) {
-            val state = getState(level, ship.id) ?: continue
-            val shipTransform = getQueryTransform(ship)
-
-            shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
-            if (!isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
-            }
-
-            val baseX = shipBlockPosTmp.x
-            val baseY = shipBlockPosTmp.y
-            val baseZ = shipBlockPosTmp.z
-
-            val shipFluid = findShipFluidAtShipPoint(level, shipPosTmp, shipBlockPosTmp)
-            if (!shipFluid.isEmpty) return shipFluid
-            shipBlockPosTmp.set(baseX, baseY, baseZ)
-
-            val suppressWorldFluid = if (!original.isEmpty) {
-                findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
-            } else {
-                false
-            }
-            shipBlockPosTmp.set(baseX, baseY, baseZ)
-
-            if (suppressWorldFluid) {
-                val count = worldSuppressionHits.incrementAndGet()
-                logThrottledDiag(count, "Suppressed world fluid query in ship interior suppression zone")
-                return Fluids.EMPTY.defaultFluidState()
-            }
-        }
-
-        return original
     }
 
     @JvmStatic
@@ -1335,29 +1363,20 @@ object ShipWaterPocketManager {
             val shipTransform = getQueryTransform(ship)
 
             shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
-            if (!isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
+            val classification = classifyShipPointWithEpsilon(
+                state = state,
+                x = shipPosTmp.x,
+                y = shipPosTmp.y,
+                z = shipPosTmp.z,
+                out = shipBlockPosTmp,
+            )
+            if (classification.kind == PointVoidClass.OUT_OF_BOUNDS || classification.kind == PointVoidClass.SOLID) {
+                continue
             }
-
-            val baseX = shipBlockPosTmp.x
-            val baseY = shipBlockPosTmp.y
-            val baseZ = shipBlockPosTmp.z
 
             val shipFluid = findShipFluidAtShipPoint(level, shipPosTmp, shipBlockPosTmp)
             if (!shipFluid.isEmpty) return shipFluid
-            shipBlockPosTmp.set(baseX, baseY, baseZ)
-
-            val suppressWorldFluid = if (!original.isEmpty) {
-                findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null
-            } else {
-                false
-            }
-            shipBlockPosTmp.set(baseX, baseY, baseZ)
-
-            if (suppressWorldFluid) {
+            if (!original.isEmpty && isSuppressionClassification(state, classification)) {
                 val count = worldSuppressionHits.incrementAndGet()
                 logThrottledDiag(count, "Suppressed world fluid query in ship interior suppression zone")
                 return Fluids.EMPTY.defaultFluidState()
@@ -1418,12 +1437,20 @@ object ShipWaterPocketManager {
             val shipTransform = getQueryTransform(ship)
 
             shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
             val state = getState(level, ship.id)
-            if (state != null && !isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
+            if (state != null) {
+                val classification = classifyShipPointWithEpsilon(
+                    state = state,
+                    x = shipPosTmp.x,
+                    y = shipPosTmp.y,
+                    z = shipPosTmp.z,
+                    out = shipBlockPosTmp,
+                )
+                if (classification.kind == PointVoidClass.OUT_OF_BOUNDS || classification.kind == PointVoidClass.SOLID) {
+                    continue
+                }
+            } else {
+                shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
             }
 
             val shipFluid = findShipFluidAtShipPoint(level, shipPosTmp, shipBlockPosTmp)
@@ -1492,14 +1519,14 @@ object ShipWaterPocketManager {
             val shipTransform = getQueryTransform(ship)
 
             shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
-            if (!isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
-            }
-
-            if (findNearbyWorldFluidSuppressionZone(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null) {
+            val classification = classifyShipPointWithEpsilon(
+                state = state,
+                x = shipPosTmp.x,
+                y = shipPosTmp.y,
+                z = shipPosTmp.z,
+                out = shipBlockPosTmp,
+            )
+            if (isSuppressionClassification(state, classification)) {
                 return true
             }
         }
@@ -1547,14 +1574,14 @@ object ShipWaterPocketManager {
             val shipTransform = getQueryTransform(ship)
 
             shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
-            if (!isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
-            }
-
-            if (findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) != null) {
+            val classification = classifyShipPointWithEpsilon(
+                state = state,
+                x = shipPosTmp.x,
+                y = shipPosTmp.y,
+                z = shipPosTmp.z,
+                out = shipBlockPosTmp,
+            )
+            if (isAirPocketClassification(state, classification)) {
                 return true
             }
         }
@@ -1595,15 +1622,15 @@ object ShipWaterPocketManager {
             val shipTransform = getQueryTransform(ship)
 
             shipTransform.worldToShip.transformPosition(worldPos, shipPosTmp)
-            shipBlockPosTmp.set(Mth.floor(shipPosTmp.x), Mth.floor(shipPosTmp.y), Mth.floor(shipPosTmp.z))
-
-            if (!isOpen(state, shipBlockPosTmp)) {
-                val openPos = findOpenShipBlockPosForPoint(level, state, shipPosTmp, shipBlockPosTmp) ?: continue
-                shipBlockPosTmp.set(openPos)
-            }
-
-            val airPos = findNearbyAirPocket(state, shipPosTmp, shipBlockPosTmp, radius = 1) ?: continue
-            return BlockPos(airPos.x, airPos.y, airPos.z)
+            val classification = classifyShipPointWithEpsilon(
+                state = state,
+                x = shipPosTmp.x,
+                y = shipPosTmp.y,
+                z = shipPosTmp.z,
+                out = shipBlockPosTmp,
+            )
+            if (!isAirPocketClassification(state, classification)) continue
+            return BlockPos(classification.voxelX, classification.voxelY, classification.voxelZ)
         }
 
         return null
@@ -1645,6 +1672,10 @@ object ShipWaterPocketManager {
         faceCondXP: ShortArray? = null,
         faceCondYP: ShortArray? = null,
         faceCondZP: ShortArray? = null,
+        templatePalette: List<ShapeCellTemplate>? = null,
+        templateIndexByVoxel: IntArray? = null,
+        voxelExteriorComponentMask: LongArray? = null,
+        voxelInteriorComponentMask: LongArray? = null,
     ): BitSet {
         out.clear()
 
@@ -1758,6 +1789,42 @@ object ShipWaterPocketManager {
                 4 -> if (lz > 0) faceCondZP[idx - strideZ].toInt() and 0xFFFF else 0
                 else -> if (lz + 1 < sizeZ) faceCondZP[idx].toInt() and 0xFFFF else 0
             }
+        }
+
+        // Component-filtered flood traversal is currently disabled for stability; precise subcell point
+        // classification remains active for gameplay queries (swimming/breathing/suppression).
+        val hasTemplateConnectivity = false
+
+        fun filteredEdgeCond(
+            idxCur: Int,
+            idxNeighbor: Int,
+            lx: Int,
+            ly: Int,
+            lz: Int,
+            dirCode: Int,
+            componentMaskCur: Long = -1L,
+            componentMaskNeighbor: Long = -1L,
+        ): Int {
+            if (componentMaskCur == 0L || componentMaskNeighbor == 0L) return 0
+            if (!hasTemplateConnectivity) {
+                return edgeCond(idxCur, lx, ly, lz, dirCode)
+            }
+
+            val palette = templatePalette ?: return edgeCond(idxCur, lx, ly, lz, dirCode)
+            val templateIdxArr = templateIndexByVoxel ?: return edgeCond(idxCur, lx, ly, lz, dirCode)
+            val templateIdxCur = templateIdxArr[idxCur]
+            val templateIdxNeighbor = templateIdxArr[idxNeighbor]
+            if (templateIdxCur !in palette.indices || templateIdxNeighbor !in palette.indices) {
+                return edgeCond(idxCur, lx, ly, lz, dirCode)
+            }
+
+            return computeTemplateFaceConductance(
+                templateA = palette[templateIdxCur],
+                templateB = palette[templateIdxNeighbor],
+                dirCodeFromA = dirCode,
+                componentMaskA = componentMaskCur,
+                componentMaskB = componentMaskNeighbor,
+            )
         }
 
         // Compute an affine map from local ship voxel coords -> world Y. This is much faster than per-point transforms.
@@ -1894,7 +1961,7 @@ object ShipWaterPocketManager {
 
             fun processHole(curIdx: Int, lx: Int, ly: Int, lz: Int, nIdx: Int, outDirCode: Int, conductance: Int) {
                 if (conductance <= 0) return
-                if (!open.get(nIdx) || interior.get(nIdx)) return
+                if (!open.get(nIdx)) return
                 if (exteriorOpen != null && !exteriorOpen.get(nIdx)) return
 
                 if (submerged.get(nIdx)) {
@@ -1930,47 +1997,242 @@ object ShipWaterPocketManager {
                 val t = cur / sizeX
                 val ly = t % sizeY
                 val lz = t / sizeY
+                val curInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                    if (cur in masks.indices) masks[cur] else 0L
+                } ?: -1L
 
                 if (lx > 0) {
                     val n = cur - 1
-                    val cond = edgeCond(cur, lx, ly, lz, 0)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 0, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 0,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 0,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 0, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 0)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 0, cond)
+                        }
                     }
                 }
                 if (lx + 1 < sizeX) {
                     val n = cur + 1
-                    val cond = edgeCond(cur, lx, ly, lz, 1)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 1, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 1,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 1,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 1, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 1)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 1, cond)
+                        }
                     }
                 }
                 if (ly > 0) {
                     val n = cur - strideY
-                    val cond = edgeCond(cur, lx, ly, lz, 2)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 2, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 2,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 2,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 2, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 2)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 2, cond)
+                        }
                     }
                 }
                 if (ly + 1 < sizeY) {
                     val n = cur + strideY
-                    val cond = edgeCond(cur, lx, ly, lz, 3)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 3, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 3,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 3,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 3, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 3)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 3, cond)
+                        }
                     }
                 }
                 if (lz > 0) {
                     val n = cur - strideZ
-                    val cond = edgeCond(cur, lx, ly, lz, 4)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 4, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 4,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 4,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 4, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 4)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 4, cond)
+                        }
                     }
                 }
                 if (lz + 1 < sizeZ) {
                     val n = cur + strideZ
-                    val cond = edgeCond(cur, lx, ly, lz, 5)
-                    if (cond > 0) {
-                        if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 5, cond)
+                    if (hasTemplateConnectivity) {
+                        val neighborInteriorMask = voxelInteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condInterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 5,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborInteriorMask,
+                        )
+                        if (condInterior > 0) enqueueInterior(n)
+
+                        val neighborExteriorMask = voxelExteriorComponentMask?.let { masks ->
+                            if (n in masks.indices) masks[n] else 0L
+                        } ?: 0L
+                        val condExterior = filteredEdgeCond(
+                            idxCur = cur,
+                            idxNeighbor = n,
+                            lx = lx,
+                            ly = ly,
+                            lz = lz,
+                            dirCode = 5,
+                            componentMaskCur = curInteriorMask,
+                            componentMaskNeighbor = neighborExteriorMask,
+                        )
+                        if (condExterior > 0) processHole(cur, lx, ly, lz, n, 5, condExterior)
+                    } else {
+                        val cond = edgeCond(cur, lx, ly, lz, 5)
+                        if (cond > 0) {
+                            if (interior.get(n)) enqueueInterior(n) else processHole(cur, lx, ly, lz, n, 5, cond)
+                        }
                     }
                 }
             }
@@ -2174,6 +2436,10 @@ object ShipWaterPocketManager {
             faceCondXP = state.faceCondXP,
             faceCondYP = state.faceCondYP,
             faceCondZP = state.faceCondZP,
+            templatePalette = state.shapeTemplatePalette,
+            templateIndexByVoxel = state.templateIndexByVoxel,
+            voxelExteriorComponentMask = state.voxelExteriorComponentMask,
+            voxelInteriorComponentMask = state.voxelInteriorComponentMask,
         )
         val floodFluid = floodFluidOut.get()
         if (floodFluid != null) {
@@ -2539,6 +2805,7 @@ object ShipWaterPocketManager {
                 waterLX: Int,
                 waterLY: Int,
                 waterLZ: Int,
+                fromWaterIdx: Int,
                 conductance: Int,
             ) {
                 if (conductance <= 0) return
@@ -2578,12 +2845,15 @@ object ShipWaterPocketManager {
                 val holeWy = openingFaceMinWorldY(waterLX, waterLY, waterLZ, outDirCode)
                 if (holeWy > fromWaterWy + 1.0e-6) return
 
-                drainFaces += conductance
+                val filteredConductance = conductance
+                if (filteredConductance <= 0) return
+
+                drainFaces += filteredConductance
                 if (holeWy < drainTarget) {
                     drainTarget = holeWy
                     bestVentIdx = holeIdx
                     bestVentOutDirCode = outDirCode
-                    bestVentConductance = conductance
+                    bestVentConductance = filteredConductance
                 }
             }
 
@@ -2612,7 +2882,7 @@ object ShipWaterPocketManager {
                         queue[tail++] = n
                     }
                     if (isWaterCell && exteriorOpen.get(n)) {
-                        considerVent(n, outDirCode, waterWy, lx, ly, lz, conductance)
+                        considerVent(n, outDirCode, waterWy, lx, ly, lz, idx, conductance)
                     }
                 }
 
