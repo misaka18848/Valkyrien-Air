@@ -21,6 +21,7 @@
     "feature.ship_water_pockets.MixinEntity",
     "feature.ship_water_pockets.MixinFlowingFluid",
     "feature.ship_water_pockets.MixinLevel",
+    "feature.ship_water_pockets.MixinLevelChunk",
     "feature.ship_water_pockets.MixinLevelReader",
     "server.MixinMinecraftServer",
     "world.level.block.MixinAbstractCauldronBlock",

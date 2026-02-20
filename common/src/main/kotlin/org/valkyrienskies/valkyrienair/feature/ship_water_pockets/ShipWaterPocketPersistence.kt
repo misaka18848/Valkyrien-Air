@@ -30,6 +30,7 @@ internal data class PersistedShipPocketState(
     val exterior: BitSet,
     val strictInterior: BitSet,
     val simulationDomain: BitSet,
+    val outsideVoid: BitSet,
     val interior: BitSet,
     val floodFluid: Fluid,
     val flooded: BitSet,
@@ -45,6 +46,7 @@ internal data class PersistedShipPocketState(
     val floodPlaneByComponent: Int2DoubleOpenHashMap,
     val geometryRevision: Long,
     val geometrySignature: Long,
+    val requiresResave: Boolean = false,
 )
 
 internal class ShipPocketSavedData : SavedData() {
@@ -84,6 +86,7 @@ internal class ShipPocketSavedData : SavedData() {
             shipTag.putByteArray(TAG_EXTERIOR, encodeBitSet(state.exterior))
             shipTag.putByteArray(TAG_STRICT_INTERIOR, encodeBitSet(state.strictInterior))
             shipTag.putByteArray(TAG_SIMULATION_DOMAIN, encodeBitSet(state.simulationDomain))
+            shipTag.putByteArray(TAG_OUTSIDE_VOID, encodeBitSet(state.outsideVoid))
             shipTag.putByteArray(TAG_INTERIOR, encodeBitSet(state.interior))
             shipTag.putByteArray(TAG_FLOODED, encodeBitSet(state.flooded))
             shipTag.putByteArray(TAG_MATERIALIZED_WATER, encodeBitSet(state.materializedWater))
@@ -118,7 +121,7 @@ internal class ShipPocketSavedData : SavedData() {
     }
 
     companion object {
-        private const val FORMAT_VERSION = 2
+        private const val FORMAT_VERSION = 3
         private const val TAG_FORMAT_VERSION = "format_version"
         private const val TAG_SHIPS = "ships"
         private const val TAG_SHIP_ID = "ship_id"
@@ -135,6 +138,7 @@ internal class ShipPocketSavedData : SavedData() {
         private const val TAG_EXTERIOR = "exterior"
         private const val TAG_STRICT_INTERIOR = "strict_interior"
         private const val TAG_SIMULATION_DOMAIN = "simulation_domain"
+        private const val TAG_OUTSIDE_VOID = "outside_void"
         private const val TAG_INTERIOR = "interior"
         private const val TAG_FLOODED = "flooded"
         private const val TAG_MATERIALIZED_WATER = "materialized_water"
@@ -170,6 +174,9 @@ internal class ShipPocketSavedData : SavedData() {
                 val sizeY = shipTag.getInt(TAG_SIZE_Y)
                 val sizeZ = shipTag.getInt(TAG_SIZE_Z)
                 if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) continue
+                val volumeLong = sizeX.toLong() * sizeY.toLong() * sizeZ.toLong()
+                if (volumeLong <= 0L || volumeLong > Int.MAX_VALUE.toLong()) continue
+                val volume = volumeLong.toInt()
 
                 val floodFluid = parseFluid(shipTag.getString(TAG_FLOOD_FLUID))
                 val floodPlanes = Int2DoubleOpenHashMap()
@@ -187,10 +194,80 @@ internal class ShipPocketSavedData : SavedData() {
                     if (version >= 2) decodeBitSet(shipTag.getByteArray(TAG_STRICT_INTERIOR)) else interiorLegacy.clone() as BitSet
                 val simulationDomain =
                     if (version >= 2) decodeBitSet(shipTag.getByteArray(TAG_SIMULATION_DOMAIN)) else interiorLegacy.clone() as BitSet
-                val voxelInteriorMask = decodeLongArray(shipTag.getByteArray(TAG_VOXEL_INTERIOR_COMPONENT_MASK))
-                val voxelSimulationMask =
+                var requiresResave = version < FORMAT_VERSION
+
+                val faceCondXPRaw = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_XP))
+                val faceCondYPRaw = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_YP))
+                val faceCondZPRaw = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_ZP))
+                val faceCondXP = sanitizeFaceConductance(faceCondXPRaw, volume).also {
+                    if (it.size != faceCondXPRaw.size || (faceCondXPRaw.isNotEmpty() && it.isEmpty())) {
+                        requiresResave = true
+                    }
+                }
+                val faceCondYP = sanitizeFaceConductance(faceCondYPRaw, volume).also {
+                    if (it.size != faceCondYPRaw.size || (faceCondYPRaw.isNotEmpty() && it.isEmpty())) {
+                        requiresResave = true
+                    }
+                }
+                val faceCondZP = sanitizeFaceConductance(faceCondZPRaw, volume).also {
+                    if (it.size != faceCondZPRaw.size || (faceCondZPRaw.isNotEmpty() && it.isEmpty())) {
+                        requiresResave = true
+                    }
+                }
+
+                val voxelExteriorMaskRaw = decodeLongArray(shipTag.getByteArray(TAG_VOXEL_EXTERIOR_COMPONENT_MASK))
+                val voxelExteriorMask = sanitizeVoxelMasks(voxelExteriorMaskRaw, volume).also {
+                    if (it.size != voxelExteriorMaskRaw.size) requiresResave = true
+                }
+                val voxelInteriorMaskRaw = decodeLongArray(shipTag.getByteArray(TAG_VOXEL_INTERIOR_COMPONENT_MASK))
+                val voxelInteriorMask = sanitizeVoxelMasks(voxelInteriorMaskRaw, volume).also {
+                    if (it.size != voxelInteriorMaskRaw.size) requiresResave = true
+                }
+                val voxelSimulationMaskRaw =
                     if (version >= 2) decodeLongArray(shipTag.getByteArray(TAG_VOXEL_SIMULATION_COMPONENT_MASK))
                     else voxelInteriorMask.copyOf()
+                val voxelSimulationMask = sanitizeVoxelMasks(voxelSimulationMaskRaw, volume).also {
+                    if (it.size != voxelSimulationMaskRaw.size) requiresResave = true
+                }
+
+                val flooded = decodeBitSet(shipTag.getByteArray(TAG_FLOODED))
+                val materializedWater = decodeBitSet(shipTag.getByteArray(TAG_MATERIALIZED_WATER))
+                val waterReachable = decodeBitSet(shipTag.getByteArray(TAG_WATER_REACHABLE))
+                val unreachableVoid = decodeBitSet(shipTag.getByteArray(TAG_UNREACHABLE_VOID))
+                val outsideVoid =
+                    if (version >= 3) {
+                        decodeBitSet(shipTag.getByteArray(TAG_OUTSIDE_VOID))
+                    } else {
+                        reconstructOutsideVoidForLegacy(
+                            open = open,
+                            simulationDomain = simulationDomain,
+                            sizeX = sizeX,
+                            sizeY = sizeY,
+                            sizeZ = sizeZ,
+                            faceCondXP = faceCondXP,
+                            faceCondYP = faceCondYP,
+                            faceCondZP = faceCondZP,
+                        ).also {
+                            requiresResave = true
+                        }
+                    }
+
+                val normalized = normalizePersistedMasks(
+                    volume = volume,
+                    open = open,
+                    exterior = exterior,
+                    strictInterior = strictInterior,
+                    simulationDomain = simulationDomain,
+                    outsideVoid = outsideVoid,
+                    interiorLegacy = interiorLegacy,
+                    flooded = flooded,
+                    materializedWater = materializedWater,
+                    waterReachable = waterReachable,
+                    unreachableVoid = unreachableVoid,
+                )
+                if (normalized) {
+                    requiresResave = true
+                }
 
                 data.persistedStates[shipId] = PersistedShipPocketState(
                     minX = minX,
@@ -203,21 +280,23 @@ internal class ShipPocketSavedData : SavedData() {
                     exterior = exterior,
                     strictInterior = strictInterior,
                     simulationDomain = simulationDomain,
+                    outsideVoid = outsideVoid,
                     interior = interiorLegacy,
                     floodFluid = floodFluid,
-                    flooded = decodeBitSet(shipTag.getByteArray(TAG_FLOODED)),
-                    materializedWater = decodeBitSet(shipTag.getByteArray(TAG_MATERIALIZED_WATER)),
-                    waterReachable = decodeBitSet(shipTag.getByteArray(TAG_WATER_REACHABLE)),
-                    unreachableVoid = decodeBitSet(shipTag.getByteArray(TAG_UNREACHABLE_VOID)),
-                    faceCondXP = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_XP)),
-                    faceCondYP = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_YP)),
-                    faceCondZP = decodeShortArray(shipTag.getByteArray(TAG_FACE_COND_ZP)),
-                    voxelExteriorComponentMask = decodeLongArray(shipTag.getByteArray(TAG_VOXEL_EXTERIOR_COMPONENT_MASK)),
+                    flooded = flooded,
+                    materializedWater = materializedWater,
+                    waterReachable = waterReachable,
+                    unreachableVoid = unreachableVoid,
+                    faceCondXP = faceCondXP,
+                    faceCondYP = faceCondYP,
+                    faceCondZP = faceCondZP,
+                    voxelExteriorComponentMask = voxelExteriorMask,
                     voxelInteriorComponentMask = voxelInteriorMask,
                     voxelSimulationComponentMask = voxelSimulationMask,
                     floodPlaneByComponent = floodPlanes,
                     geometryRevision = shipTag.getLong(TAG_GEOMETRY_REVISION),
                     geometrySignature = shipTag.getLong(TAG_GEOMETRY_SIGNATURE),
+                    requiresResave = requiresResave,
                 )
             }
             return data
@@ -260,6 +339,7 @@ internal fun snapshotStateForPersistence(state: ShipPocketState): PersistedShipP
         exterior = state.exterior.clone() as BitSet,
         strictInterior = state.strictInterior.clone() as BitSet,
         simulationDomain = state.simulationDomain.clone() as BitSet,
+        outsideVoid = state.outsideVoid.clone() as BitSet,
         interior = state.interior.clone() as BitSet,
         floodFluid = canonicalFloodSource(state.floodFluid),
         flooded = state.flooded.clone() as BitSet,
@@ -289,6 +369,7 @@ internal fun applyPersistedState(state: ShipPocketState, persisted: PersistedShi
     state.exterior = persisted.exterior.clone() as BitSet
     state.strictInterior = persisted.strictInterior.clone() as BitSet
     state.simulationDomain = persisted.simulationDomain.clone() as BitSet
+    state.outsideVoid = persisted.outsideVoid.clone() as BitSet
     state.interior = persisted.strictInterior.clone() as BitSet
     state.floodFluid = canonicalFloodSource(persisted.floodFluid)
     state.flooded = persisted.flooded.clone() as BitSet
@@ -308,9 +389,113 @@ internal fun applyPersistedState(state: ShipPocketState, persisted: PersistedShi
     state.geometryRevision = persisted.geometryRevision
     state.geometrySignature = persisted.geometrySignature
     state.dirty = true
-    state.persistDirty = false
+    state.persistDirty = persisted.requiresResave
     state.restoredFromPersistence = true
     state.awaitingGeometryValidation = true
+}
+
+private fun sanitizeFaceConductance(values: ShortArray, volume: Int): ShortArray {
+    if (values.isEmpty()) return values
+    return if (values.size >= volume) values.copyOf(volume) else ShortArray(0)
+}
+
+private fun sanitizeVoxelMasks(values: LongArray, volume: Int): LongArray {
+    return if (values.size > volume) values.copyOf(volume) else values
+}
+
+private fun reconstructOutsideVoidForLegacy(
+    open: BitSet,
+    simulationDomain: BitSet,
+    sizeX: Int,
+    sizeY: Int,
+    sizeZ: Int,
+    faceCondXP: ShortArray,
+    faceCondYP: ShortArray,
+    faceCondZP: ShortArray,
+): BitSet {
+    val volume = sizeX * sizeY * sizeZ
+    val hasValidFaceConductance =
+        faceCondXP.size == volume &&
+            faceCondYP.size == volume &&
+            faceCondZP.size == volume
+    if (hasValidFaceConductance) {
+        return computeOutsideVoidFromGeometry(
+            open = open,
+            simulationDomain = simulationDomain,
+            sizeX = sizeX,
+            sizeY = sizeY,
+            sizeZ = sizeZ,
+            faceCondXP = faceCondXP,
+            faceCondYP = faceCondYP,
+            faceCondZP = faceCondZP,
+        )
+    }
+    val fallback = open.clone() as BitSet
+    fallback.andNot(simulationDomain)
+    return fallback
+}
+
+private fun normalizePersistedMasks(
+    volume: Int,
+    open: BitSet,
+    exterior: BitSet,
+    strictInterior: BitSet,
+    simulationDomain: BitSet,
+    outsideVoid: BitSet,
+    interiorLegacy: BitSet,
+    flooded: BitSet,
+    materializedWater: BitSet,
+    waterReachable: BitSet,
+    unreachableVoid: BitSet,
+): Boolean {
+    var changed = false
+
+    fun clampToVolume(bits: BitSet): Boolean {
+        val firstOutOfRange = bits.nextSetBit(volume)
+        if (firstOutOfRange >= 0) {
+            bits.clear(volume, bits.length())
+            return true
+        }
+        return false
+    }
+
+    fun clampSubset(bits: BitSet, superset: BitSet): Boolean {
+        val originalCardinality = bits.cardinality()
+        bits.and(superset)
+        return bits.cardinality() != originalCardinality
+    }
+
+    changed = clampToVolume(open) || changed
+    changed = clampToVolume(exterior) || changed
+    changed = clampToVolume(strictInterior) || changed
+    changed = clampToVolume(simulationDomain) || changed
+    changed = clampToVolume(outsideVoid) || changed
+    changed = clampToVolume(interiorLegacy) || changed
+    changed = clampToVolume(flooded) || changed
+    changed = clampToVolume(materializedWater) || changed
+    changed = clampToVolume(waterReachable) || changed
+    changed = clampToVolume(unreachableVoid) || changed
+
+    changed = clampSubset(exterior, open) || changed
+    changed = clampSubset(strictInterior, open) || changed
+    changed = clampSubset(simulationDomain, open) || changed
+    changed = clampSubset(interiorLegacy, open) || changed
+    changed = clampSubset(flooded, open) || changed
+    changed = clampSubset(materializedWater, open) || changed
+    changed = clampSubset(waterReachable, open) || changed
+    changed = clampSubset(unreachableVoid, open) || changed
+
+    changed = clampSubset(flooded, simulationDomain) || changed
+    changed = clampSubset(materializedWater, simulationDomain) || changed
+
+    changed = clampSubset(outsideVoid, open) || changed
+    val outsideBefore = outsideVoid.cardinality()
+    outsideVoid.andNot(simulationDomain)
+    if (outsideVoid.cardinality() != outsideBefore) {
+        changed = true
+    }
+
+    return changed
 }
 
 private fun canonicalFloodSource(fluid: Fluid): Fluid {

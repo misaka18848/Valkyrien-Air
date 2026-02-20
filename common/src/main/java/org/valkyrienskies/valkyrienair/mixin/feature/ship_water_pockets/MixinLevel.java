@@ -114,21 +114,8 @@ public abstract class MixinLevel {
     )
     private void vs$markShipWaterPocketDirty(final BlockPos pos, final BlockState state, final int flags,
         final int recursionLeft, final CallbackInfoReturnable<Boolean> cir) {
-        if (!cir.getReturnValueZ()) return;
-        if (ShipWaterPocketManager.isApplyingInternalUpdates()) return;
-
-        final Level level = Level.class.cast(this);
-        if (!VSGameUtilsKt.isBlockInShipyard(level, pos)) return;
-
-        final Ship ship = VSGameUtilsKt.getShipManagingPos(level, pos);
-        if (ship == null) return;
-
-        final FluidState placedFluid = state.getFluidState();
-        if (!placedFluid.isEmpty()) {
-            ShipWaterPocketManager.onExternalShipFluidPlacement(level, ship.getId(), pos, placedFluid.getType());
-        }
-
-        ShipWaterPocketManager.markShipDirty(level, ship.getId());
+        // Dirty tracking for block changes is handled in MixinLevelChunk where we can compare old/new state
+        // and filter out non-structural liquid churn that causes geometry invalidation spam.
     }
 
     @Inject(

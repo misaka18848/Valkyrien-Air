@@ -20,6 +20,8 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.level.material.Fluid
 import net.minecraft.world.level.material.Fluids
 import net.minecraft.world.level.material.FlowingFluid
+import net.minecraft.world.phys.shapes.BooleanOp
+import net.minecraft.world.phys.shapes.Shapes
 import net.minecraft.world.phys.Vec3
 import org.apache.logging.log4j.LogManager
 import org.joml.Vector3d
@@ -278,6 +280,36 @@ object ShipWaterPocketManager {
     @JvmStatic
     fun isBypassingFluidOverrides(): Boolean = bypassFluidOverridesDepth.get()[0] > 0
 
+    @JvmStatic
+    fun shouldMarkShipGeometryDirtyForBlockChange(
+        level: Level,
+        pos: BlockPos,
+        previousState: BlockState?,
+        newState: BlockState,
+    ): Boolean {
+        val oldState = previousState ?: return false
+        if (oldState == newState) return false
+
+        val oldFluid = oldState.fluidState
+        val newFluid = newState.fluidState
+        if (
+            oldState.block is LiquidBlock &&
+            newState.block is LiquidBlock &&
+            !oldFluid.isEmpty &&
+            !newFluid.isEmpty &&
+            canonicalFloodSource(oldFluid.type) == canonicalFloodSource(newFluid.type)
+        ) {
+            // Ignore liquid level churn for the same fluid type.
+            return false
+        }
+
+        if (oldState.block != newState.block) return true
+
+        val oldShape = oldState.getCollisionShape(level, pos)
+        val newShape = newState.getCollisionShape(level, pos)
+        return Shapes.joinIsNotEmpty(oldShape, newShape, BooleanOp.NOT_SAME)
+    }
+
     private inline fun <T> withBypassedFluidOverrides(block: () -> T): T {
         val depth = bypassFluidOverridesDepth.get()
         depth[0]++
@@ -302,9 +334,165 @@ object ShipWaterPocketManager {
             map[shipId] = created
             created
         }
+        val wasAlreadyDirty = state.dirty
+        val geometryInFlight = (state.pendingGeometryFuture?.isDone == false) || state.geometryJobInFlight
         state.dirty = true
         state.persistDirty = true
-        state.geometryInvalidationStamp++
+        if (!wasAlreadyDirty || geometryInFlight) {
+            state.geometryInvalidationStamp++
+        }
+    }
+
+    private fun clampBitSetToVolume(bits: BitSet, volume: Int): Boolean {
+        val firstOutOfRange = bits.nextSetBit(volume)
+        if (firstOutOfRange >= 0) {
+            bits.clear(volume, bits.length())
+            return true
+        }
+        return false
+    }
+
+    private fun isBitSetSubset(subset: BitSet, superset: BitSet): Boolean {
+        var idx = subset.nextSetBit(0)
+        while (idx >= 0) {
+            if (!superset.get(idx)) return false
+            idx = subset.nextSetBit(idx + 1)
+        }
+        return true
+    }
+
+    private fun isRestoredStateStructurallyUsableForBounds(
+        state: ShipPocketState,
+        minX: Int,
+        minY: Int,
+        minZ: Int,
+        sizeX: Int,
+        sizeY: Int,
+        sizeZ: Int,
+    ): Boolean {
+        if (boundsMismatch(state, minX, minY, minZ, sizeX, sizeY, sizeZ)) return false
+        val volumeLong = sizeX.toLong() * sizeY.toLong() * sizeZ.toLong()
+        if (volumeLong <= 0L || volumeLong > MAX_SIM_VOLUME.toLong()) return false
+        val volume = volumeLong.toInt()
+
+        if (state.faceCondXP.isNotEmpty() && state.faceCondXP.size != volume) return false
+        if (state.faceCondYP.isNotEmpty() && state.faceCondYP.size != volume) return false
+        if (state.faceCondZP.isNotEmpty() && state.faceCondZP.size != volume) return false
+
+        if (state.open.nextSetBit(volume) >= 0) return false
+        if (state.exterior.nextSetBit(volume) >= 0) return false
+        if (state.strictInterior.nextSetBit(volume) >= 0) return false
+        if (state.simulationDomain.nextSetBit(volume) >= 0) return false
+        if (state.outsideVoid.nextSetBit(volume) >= 0) return false
+        if (state.flooded.nextSetBit(volume) >= 0) return false
+        if (state.materializedWater.nextSetBit(volume) >= 0) return false
+        if (state.waterReachable.nextSetBit(volume) >= 0) return false
+        if (state.unreachableVoid.nextSetBit(volume) >= 0) return false
+
+        if (!isBitSetSubset(state.strictInterior, state.open)) return false
+        if (!isBitSetSubset(state.simulationDomain, state.open)) return false
+        if (!isBitSetSubset(state.outsideVoid, state.open)) return false
+        if (state.outsideVoid.intersects(state.simulationDomain)) return false
+        if (!isBitSetSubset(state.flooded, state.open)) return false
+        if (!isBitSetSubset(state.materializedWater, state.open)) return false
+        if (!isBitSetSubset(state.waterReachable, state.open)) return false
+        if (!isBitSetSubset(state.unreachableVoid, state.open)) return false
+        if (!isBitSetSubset(state.flooded, state.simulationDomain)) return false
+        if (!isBitSetSubset(state.materializedWater, state.simulationDomain)) return false
+
+        return true
+    }
+
+    private fun ensureOutsideVoidMask(state: ShipPocketState): Boolean {
+        val volumeLong = state.sizeX.toLong() * state.sizeY.toLong() * state.sizeZ.toLong()
+        if (volumeLong <= 0L || volumeLong > MAX_SIM_VOLUME.toLong()) return false
+        val volume = volumeLong.toInt()
+        var changed = false
+
+        if (state.faceCondXP.isNotEmpty() && state.faceCondXP.size != volume) {
+            state.faceCondXP = ShortArray(0)
+            changed = true
+        }
+        if (state.faceCondYP.isNotEmpty() && state.faceCondYP.size != volume) {
+            state.faceCondYP = ShortArray(0)
+            changed = true
+        }
+        if (state.faceCondZP.isNotEmpty() && state.faceCondZP.size != volume) {
+            state.faceCondZP = ShortArray(0)
+            changed = true
+        }
+
+        changed = clampBitSetToVolume(state.open, volume) || changed
+        changed = clampBitSetToVolume(state.exterior, volume) || changed
+        changed = clampBitSetToVolume(state.strictInterior, volume) || changed
+        changed = clampBitSetToVolume(state.simulationDomain, volume) || changed
+        changed = clampBitSetToVolume(state.outsideVoid, volume) || changed
+        changed = clampBitSetToVolume(state.flooded, volume) || changed
+        changed = clampBitSetToVolume(state.materializedWater, volume) || changed
+        changed = clampBitSetToVolume(state.waterReachable, volume) || changed
+        changed = clampBitSetToVolume(state.unreachableVoid, volume) || changed
+
+        val strictInteriorBefore = state.strictInterior.cardinality()
+        state.strictInterior.and(state.open)
+        if (state.strictInterior.cardinality() != strictInteriorBefore) changed = true
+
+        val simulationBefore = state.simulationDomain.cardinality()
+        state.simulationDomain.and(state.open)
+        if (state.simulationDomain.cardinality() != simulationBefore) changed = true
+
+        val floodedBefore = state.flooded.cardinality()
+        state.flooded.and(state.open)
+        state.flooded.and(state.simulationDomain)
+        if (state.flooded.cardinality() != floodedBefore) changed = true
+
+        val materializedBefore = state.materializedWater.cardinality()
+        state.materializedWater.and(state.open)
+        state.materializedWater.and(state.simulationDomain)
+        if (state.materializedWater.cardinality() != materializedBefore) changed = true
+
+        val reachableBefore = state.waterReachable.cardinality()
+        state.waterReachable.and(state.open)
+        if (state.waterReachable.cardinality() != reachableBefore) changed = true
+
+        val unreachableBefore = state.unreachableVoid.cardinality()
+        state.unreachableVoid.and(state.open)
+        if (state.unreachableVoid.cardinality() != unreachableBefore) changed = true
+
+        val outsideBefore = state.outsideVoid.cardinality()
+        state.outsideVoid.and(state.open)
+        state.outsideVoid.andNot(state.simulationDomain)
+        if (state.outsideVoid.cardinality() != outsideBefore) changed = true
+
+        if (state.outsideVoid.isEmpty) {
+            val outsideCandidates = state.open.clone() as BitSet
+            outsideCandidates.andNot(state.simulationDomain)
+            if (!outsideCandidates.isEmpty) {
+                val hasFaceConductance =
+                    state.faceCondXP.size == volume &&
+                        state.faceCondYP.size == volume &&
+                        state.faceCondZP.size == volume
+                state.outsideVoid = if (hasFaceConductance) {
+                    computeOutsideVoidFromGeometry(
+                        open = state.open,
+                        simulationDomain = state.simulationDomain,
+                        sizeX = state.sizeX,
+                        sizeY = state.sizeY,
+                        sizeZ = state.sizeZ,
+                        faceCondXP = state.faceCondXP,
+                        faceCondYP = state.faceCondYP,
+                        faceCondZP = state.faceCondZP,
+                    )
+                } else {
+                    outsideCandidates
+                }
+                changed = true
+            }
+        }
+
+        if (changed) {
+            state.persistDirty = true
+        }
+        return true
     }
 
     private fun loadPersistedServerState(level: ServerLevel, shipId: Long): ShipPocketState? {
@@ -1658,7 +1846,17 @@ object ShipWaterPocketManager {
                 }
             }
 
-            if (state.awaitingGeometryValidation && !geometryApplied) {
+            val restoredStateUsable = isRestoredStateStructurallyUsableForBounds(
+                state = state,
+                minX = minX,
+                minY = minY,
+                minZ = minZ,
+                sizeX = sizeX,
+                sizeY = sizeY,
+                sizeZ = sizeZ,
+            )
+
+            if (state.awaitingGeometryValidation && !geometryApplied && !restoredStateUsable) {
                 flushPersistedServerState(
                     level = level,
                     shipId = ship.id,
@@ -1667,6 +1865,10 @@ object ShipWaterPocketManager {
                     nowTick = level.gameTime,
                 )
                 return@forEach
+            }
+
+            if (restoredStateUsable) {
+                ensureOutsideVoidMask(state)
             }
 
             val now = level.gameTime
@@ -2375,6 +2577,7 @@ object ShipWaterPocketManager {
         addedIndices: IntArray,
     ) {
         if (addedIndices.isEmpty()) return
+        if (!ensureOutsideVoidMask(state)) return
 
         val sizeX = state.sizeX
         val sizeY = state.sizeY
