@@ -82,22 +82,28 @@ internal object ShipPocketAsyncRuntime {
     ): CompletableFuture<T>? {
         if (!tryAcquirePendingSlot()) return null
 
-        submittedBySubsystem[subsystemIdx(subsystem)].incrementAndGet()
+        val subsystemIndex = subsystemIdx(subsystem)
+        submittedBySubsystem[subsystemIndex].incrementAndGet()
 
-        val future = CompletableFuture.supplyAsync(
+        val sourceFuture = CompletableFuture.supplyAsync(
             {
                 task()
             },
             executor,
         )
-        return future.whenComplete { _, throwable ->
+
+        // Keep slot accounting bound to the source task, not the cancelable view we return to callers.
+        sourceFuture.whenComplete { _, throwable ->
             pendingJobs.decrementAndGet()
             if (throwable == null) {
-                completedBySubsystem[subsystemIdx(subsystem)].incrementAndGet()
+                completedBySubsystem[subsystemIndex].incrementAndGet()
             } else {
-                failedBySubsystem[subsystemIdx(subsystem)].incrementAndGet()
+                failedBySubsystem[subsystemIndex].incrementAndGet()
             }
         }
+
+        // Return a distinct stage so caller-side cancellation cannot suppress internal accounting callbacks.
+        return sourceFuture.thenApply { it }
     }
 
     @JvmStatic
