@@ -61,63 +61,61 @@ jobs:
           chmod +x gradlew
           ./gradlew clean build --no-build-cache --no-daemon
 
-      - name: Install Rclone & Configure Env
+      - name: Install Rclone
         if: steps.check_update.outputs.has_update == 'true'
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -q rclone-current-linux-amd64.zip
           mv rclone-*-linux-amd64/rclone .
           chmod +x rclone
-          
-          # 设置环境变量，让 rclone 直接读取，无需生成 config 文件
-          export RCLONE_CONFIG_MYR2_TYPE=s3
-          export RCLONE_CONFIG_MYR2_PROVIDER=Cloudflare
-          export RCLONE_CONFIG_MYR2_ENDPOINT=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
-          export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
-          export RCLONE_CONFIG_MYR2_REGION=auto
-          export RCLONE_CONFIG_MYR2_ACL=private
-          
-          echo "✅ Rclone configured via environment variables."
-          # 测试连接 (可选，调试用)
-          # ./rclone lsd myr2:
+          echo "✅ Rclone installed."
 
       - name: Process and Upload (Overwrite Old)
         if: steps.check_update.outputs.has_update == 'true'
+        env:
+          # 1. 先在 Step 级别定义环境变量，避免 export 命令解析 Secrets 出错
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          MOD_PREFIX: ${{ env.MOD_PREFIX }} # 引用 job 级别的 MOD_PREFIX
         run: |
-          # 必须重新导出变量，因为每个 run 步骤是独立的 shell
+          # 2. 在 run 内部，将环境变量导出为 Rclone 专用的配置格式
+          # 注意：这里使用双引号包裹值，防止特殊字符问题
           export RCLONE_CONFIG_MYR2_TYPE=s3
           export RCLONE_CONFIG_MYR2_PROVIDER=Cloudflare
-          export RCLONE_CONFIG_MYR2_ENDPOINT=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
-          export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          export RCLONE_CONFIG_MYR2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID="${R2_ACCESS_KEY}"
+          export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY="${R2_SECRET_KEY}"
           export RCLONE_CONFIG_MYR2_REGION=auto
+          export RCLONE_CONFIG_MYR2_ACL=private
+
+          # 验证配置是否加载成功 (调试用，生产环境可保留)
+          echo "🔍 Checking Rclone config..."
+          if ! ./rclone lsd myr2: > /dev/null 2>&1; then
+             echo "⚠️ Warning: Cannot list bucket root, but will attempt upload anyway."
+          else
+             echo "✅ Rclone connection verified."
+          fi
 
           process_and_upload() {
             local src_path="$1"
-            local loader="$2" 
+            local loader="$2"
             local filename=$(basename "$src_path")
             
-            # 1. 过滤
+            # 过滤不需要的文件
             if [[ "$filename" == *"-dev-shadow"* ]] || [[ "$filename" == *"-sources"* ]]; then
               echo "⏭️ Skip: $filename"
               return
             fi
 
-            # 2. 定义目标名
             local target_name="${MOD_PREFIX}-${loader}.jar"
-            # 注意：这里不要加引号包裹整个 remote:path，防止 shell 解析问题
-            local remote_dest="myr2:${{ secrets.R2_BUCKET_NAME }}/${target_name}"
+            local remote_dest="myr2:${R2_BUCKET}/${target_name}"
 
             echo "⬆️ Uploading: $filename -> $target_name"
             
-            # 3. 执行上传
-            # --force: 强制覆盖
-            # --transfers=1: 单线程传输更稳定
-            # --s3-chunk-size=64M: 适合小文件
-            ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M
-            
-            if [ $? -eq 0 ]; then
+            # 执行上传 (自动覆盖旧文件)
+            if ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M; then
               echo "✅ Success: $target_name updated."
             else
               echo "❌ Failed to upload $target_name"
@@ -128,12 +126,14 @@ jobs:
           if [ -d "build/libs" ]; then
             for f in build/libs/*.jar; do
               [ -e "$f" ] || continue
-              # 自动识别 loader
               local loader=""
               if [[ "$f" == *"-forge.jar" ]]; then loader="forge"; fi
               if [[ "$f" == *"-fabric.jar" ]]; then loader="fabric"; fi
+              
               if [ -n "$loader" ]; then
                 process_and_upload "$f" "$loader"
+              else
+                echo "⚠️ Skip unknown loader: $f"
               fi
             done
           fi
