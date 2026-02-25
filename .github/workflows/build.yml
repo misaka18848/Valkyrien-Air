@@ -1,42 +1,107 @@
-name: Build Mod
+name: Sync VAir & Build
 
 on:
+  schedule:
+    - cron: '0 0 * * *'
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to build'
-        required: true
-        default: 'main'
-        type: string
+
+env:
+  JAVA_VERSION: 17
+  TARGET_BRANCH: "main"
+  UPSTREAM_URL: "https://github.com/GigaBrawler/Valkyrien-Air.git"
+  MOD_PREFIX: "valkyrien-air"
+  R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 jobs:
-  build:
+  sync-and-build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
-      
-      - name: Set up JDK 17
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream ${{ env.UPSTREAM_URL }}
+          git fetch upstream
+
+      - name: Check Upstream Changes (Last 24h)
+        id: check_update
+        run: |
+          UPSTREAM_TIME=$(git log -1 --format=%ct upstream/${{ env.TARGET_BRANCH }})
+          DAY_AGO=$(date -d "24 hours ago" +%s)
+          if [ "$UPSTREAM_TIME" -gt "$DAY_AGO" ]; then
+            echo "has_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync with Upstream (Merge)
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          git merge upstream/${{ env.TARGET_BRANCH }} -m "chore: sync with upstream"
+
+      - name: Setup Java
+        if: steps.check_update.outputs.has_update == 'true'
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
-      
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-      
-      - name: Grant Execute Permission for Gradlew
-        run: chmod +x gradlew
-      
-      - name: Build with Gradle
-        run: ./gradlew build
-      
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mod-build-${{ inputs.branch }}-${{ github.sha }}
-          path: build/libs/*.jar
-          retention-days: 30
+
+      - name: Build Mod (No Cache)
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew clean build --no-build-cache --no-daemon
+
+      - name: Install Rclone
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q rclone-current-linux-amd64.zip
+          mv rclone-*-linux-amd64/rclone .
+          chmod +x rclone
+          ./rclone config create myr2 s3 provider Cloudflare \
+            endpoint https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            access_key_id ${{ secrets.R2_ACCESS_KEY_ID }} \
+            secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }} \
+            region auto
+
+      - name: Process, Clean Old, and Upload
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          process_and_upload() {
+            local src_path="$1"
+            local filename=$(basename "$src_path")
+            
+            if [[ "$filename" == *"-dev-shadow"* ]] || [[ "$filename" == *"-sources"* ]]; then
+              return
+            fi
+
+            # 识别 loader
+            local loader=""
+            if [[ "$filename" == *"-forge.jar" ]]; then loader="forge"; fi
+            if [[ "$filename" == *"-fabric.jar" ]]; then loader="fabric"; fi
+            
+            if [ -z "$loader" ]; then
+              echo "⚠️ 无法识别 Loader，跳过: $filename"
+              return
+            fi
+
+            local target_name="${MOD_PREFIX}-${loader}.jar"
+            echo "⬆️ 上传: $filename -> $target_name"
+            ./rclone copy "$src_path" "myr2:${{ secrets.R2_BUCKET_NAME }}/$target_name"
+          }
+
+          if [ -d "build/libs" ]; then
+            for f in build/libs/*.jar; do
+              [ -e "$f" ] && process_and_upload "$f"
+            done
+          fi
