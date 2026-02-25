@@ -73,7 +73,6 @@ jobs:
       - name: Process and Upload (Overwrite Old)
         if: steps.check_update.outputs.has_update == 'true'
         env:
-          # 映射 Secrets 到简单的环境变量，避免 export 解析错误
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -87,7 +86,6 @@ jobs:
           export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID="${R2_ACCESS_KEY}"
           export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY="${R2_SECRET_KEY}"
           export RCLONE_CONFIG_MYR2_REGION=auto
-          export RCLONE_CONFIG_MYR2_ACL=private
 
           echo "🔍 Rclone config loaded. Starting upload..."
 
@@ -108,9 +106,12 @@ jobs:
 
             echo "⬆️ Uploading: $filename -> $target_name"
             
-            # 执行上传 (自动覆盖旧文件)
-            # 忽略 list 错误的警告，直接尝试 copy
-            if ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M 2>&1; then
+            # 3. 执行上传
+            # rclone copy 默认行为：
+            # 1. 如果目标文件不存在 -> 上传
+            # 2. 如果目标文件存在且内容不同 -> 覆盖 (无需 --force)
+            # 3. 如果目标文件存在且内容相同 -> 跳过
+            if ./rclone copy "$src_path" "$remote_dest" --transfers=4 --verbose; then
               echo "✅ Success: $target_name updated."
             else
               echo "❌ Failed to upload $target_name"
@@ -118,14 +119,13 @@ jobs:
             fi
           }
 
-          # 3. 执行上传逻辑
-
+          # 4. 执行逻辑
           if [ -d "build/libs" ]; then
             echo "📂 Found build/libs"
             for f in build/libs/*.jar; do
               [ -e "$f" ] || continue
               
-              loader="" # 普通变量，不是 local
+              loader=""
               if [[ "$f" == *"-forge.jar" ]]; then loader="forge"; fi
               if [[ "$f" == *"-fabric.jar" ]]; then loader="fabric"; fi
               
