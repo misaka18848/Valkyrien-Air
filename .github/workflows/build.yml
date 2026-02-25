@@ -79,7 +79,7 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           MOD_PREFIX: ${{ env.MOD_PREFIX }}
         run: |
-          # 1. 创建配置目录和文件
+          # 1. 创建 Rclone 配置
           mkdir -p ~/.config/rclone
           CONF_FILE="$HOME/.config/rclone/rclone.conf"
           
@@ -90,53 +90,54 @@ jobs:
           echo "access_key_id = ${R2_ACCESS_KEY}" >> "$CONF_FILE"
           echo "secret_access_key = ${R2_SECRET_KEY}" >> "$CONF_FILE"
           echo "region = auto" >> "$CONF_FILE"
-          
-          echo "✅ Config file created at: $CONF_FILE"
-          
-          # 2. 验证配置文件内容 (脱敏显示)
-          echo "--- Config Content Check ---"
-          grep -v "secret_access_key\|access_key_id" "$CONF_FILE"
-          echo "----------------------------"
 
-          # 3. 定义上传函数
+          echo "✅ Rclone config created."
+
+          # 2. 定义处理函数：先重命名，再上传
           process_and_upload() {
             local src_path="$1"
             local loader="$2"
-            local filename=$(basename "$src_path")
+            local original_filename=$(basename "$src_path")
             
-            # 过滤
-            if [[ "$filename" == *"-dev-shadow"* ]] || [[ "$filename" == *"-sources"* ]]; then
-              echo "⏭️ Skip: $filename"
+            # 过滤不需要的文件
+            if [[ "$original_filename" == *"-dev-shadow"* ]] || [[ "$original_filename" == *"-sources"* ]]; then
+              echo "⏭️ Skip: $original_filename"
               return
             fi
 
-            local target_name="${MOD_PREFIX}-${loader}.jar"
-            # 注意：远程路径格式 remote:bucket/path
-            local remote_dest="myr2:${R2_BUCKET}/${target_name}"
+            # 定义目标文件名
+            local target_filename="${MOD_PREFIX}-${loader}.jar"
+            
+            # 创建一个临时目录用于存放重命名后的文件，避免污染源码树
+            local upload_dir="upload_temp"
+            mkdir -p "$upload_dir"
+            local renamed_path="${upload_dir}/${target_filename}"
 
-            echo "⬆️ Uploading: $filename -> $target_name"
+            # 【关键步骤 1】本地重命名
+            cp "$src_path" "$renamed_path"
+            echo "📝 Renamed: $original_filename -> $target_filename"
+
+            # 【关键步骤 2】上传到桶的根目录 (或者指定子目录，但必须以 / 结尾)
+            # 格式：rclone copy ./local_file.jar remote:bucket_name/
+            # 注意：目标路径以 / 结尾，明确告诉 rclone 这是一个目录，文件名将取自本地文件
+            local remote_dest="myr2:${R2_BUCKET}/"
+
+            echo "⬆️ Uploading $target_filename to $remote_dest"
             
-            # 【关键】使用 --config 参数显式指定配置文件路径
-            # 先测试连接 (lsf 列出文件)，如果失败则报错，避免盲目 copy
-            if ! ./rclone lsf "myr2:${R2_BUCKET}" --config "$CONF_FILE" > /dev/null 2>&1; then
-                echo "❌ Connection test failed! Cannot list bucket."
-                echo "Please check your R2 Credentials (Access Key, Secret Key, Account ID) and Bucket Name."
-                exit 1
-            fi
-            
-            # 执行上传
-            # --config "$CONF_FILE": 强制使用我们生成的配置文件
-            if ./rclone copy "$src_path" "$remote_dest" --config "$CONF_FILE" --ignore-checksum --verbose; then
-              echo "✅ Success: $target_name updated."
+            if ./rclone copy "$renamed_path" "$remote_dest" --config "$CONF_FILE" --ignore-checksum --verbose; then
+              echo "✅ Success: $target_filename uploaded."
             else
-              echo "❌ Failed to upload $target_name"
+              echo "❌ Failed to upload $target_filename"
               exit 1
             fi
+            
+            # 清理临时文件
+            rm -rf "$upload_dir"
           }
 
-          # 4. 执行逻辑
+          # 3. 执行逻辑
+
           if [ -d "build/libs" ]; then
-            echo "📂 Found build/libs"
             for f in build/libs/*.jar; do
               [ -e "$f" ] || continue
               
