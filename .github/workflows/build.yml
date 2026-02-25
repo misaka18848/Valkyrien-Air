@@ -79,23 +79,24 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           MOD_PREFIX: ${{ env.MOD_PREFIX }}
         run: |
-          # 1. 创建配置目录
+          # 1. 创建配置目录和文件
           mkdir -p ~/.config/rclone
-
-          # 2. 使用 echo 逐行写入配置文件 (避免 heredoc 语法错误)
-          # 注意：这里使用双引号包裹变量，确保特殊字符被正确展开
-          echo "[myr2]" > ~/.config/rclone/rclone.conf
-          echo "type = s3" >> ~/.config/rclone/rclone.conf
-          echo "provider = Cloudflare" >> ~/.config/rclone/rclone.conf
-          echo "endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> ~/.config/rclone/rclone.conf
-          echo "access_key_id = ${R2_ACCESS_KEY}" >> ~/.config/rclone/rclone.conf
-          echo "secret_access_key = ${R2_SECRET_KEY}" >> ~/.config/rclone/rclone.conf
-          echo "region = auto" >> ~/.config/rclone/rclone.conf
-          echo "acl = private" >> ~/.config/rclone/rclone.conf
-
-          echo "✅ Rclone config created successfully."
-          # 可选：显示配置结构（隐藏密钥）
-          # grep -v "secret_access_key\|access_key_id" ~/.config/rclone/rclone.conf
+          CONF_FILE="$HOME/.config/rclone/rclone.conf"
+          
+          echo "[myr2]" > "$CONF_FILE"
+          echo "type = s3" >> "$CONF_FILE"
+          echo "provider = Cloudflare" >> "$CONF_FILE"
+          echo "endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "$CONF_FILE"
+          echo "access_key_id = ${R2_ACCESS_KEY}" >> "$CONF_FILE"
+          echo "secret_access_key = ${R2_SECRET_KEY}" >> "$CONF_FILE"
+          echo "region = auto" >> "$CONF_FILE"
+          
+          echo "✅ Config file created at: $CONF_FILE"
+          
+          # 2. 验证配置文件内容 (脱敏显示)
+          echo "--- Config Content Check ---"
+          grep -v "secret_access_key\|access_key_id" "$CONF_FILE"
+          echo "----------------------------"
 
           # 3. 定义上传函数
           process_and_upload() {
@@ -103,20 +104,29 @@ jobs:
             local loader="$2"
             local filename=$(basename "$src_path")
             
-            # 过滤不需要的文件
+            # 过滤
             if [[ "$filename" == *"-dev-shadow"* ]] || [[ "$filename" == *"-sources"* ]]; then
               echo "⏭️ Skip: $filename"
               return
             fi
 
             local target_name="${MOD_PREFIX}-${loader}.jar"
+            # 注意：远程路径格式 remote:bucket/path
             local remote_dest="myr2:${R2_BUCKET}/${target_name}"
 
             echo "⬆️ Uploading: $filename -> $target_name"
             
+            # 【关键】使用 --config 参数显式指定配置文件路径
+            # 先测试连接 (lsf 列出文件)，如果失败则报错，避免盲目 copy
+            if ! ./rclone lsf "myr2:${R2_BUCKET}" --config "$CONF_FILE" > /dev/null 2>&1; then
+                echo "❌ Connection test failed! Cannot list bucket."
+                echo "Please check your R2 Credentials (Access Key, Secret Key, Account ID) and Bucket Name."
+                exit 1
+            fi
+            
             # 执行上传
-            # --ignore-checksum: 跳过校验和检查，加快速度并避免某些 S3 兼容性问题
-            if ./rclone copy "$src_path" "$remote_dest" --ignore-checksum --verbose; then
+            # --config "$CONF_FILE": 强制使用我们生成的配置文件
+            if ./rclone copy "$src_path" "$remote_dest" --config "$CONF_FILE" --ignore-checksum --verbose; then
               echo "✅ Success: $target_name updated."
             else
               echo "❌ Failed to upload $target_name"
@@ -124,7 +134,7 @@ jobs:
             fi
           }
 
-          # 4. 执行上传逻辑
+          # 4. 执行逻辑
           if [ -d "build/libs" ]; then
             echo "📂 Found build/libs"
             for f in build/libs/*.jar; do
