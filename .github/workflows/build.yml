@@ -119,24 +119,7 @@ jobs:
           }
 
           # 3. 执行上传逻辑
-          
-          # --- 场景 A: VS2 和 Clockwork (forge/build/libs, fabric/build/libs) ---
-          if [ -d "forge/build/libs" ]; then
-            echo "📂 Found forge/build/libs"
-            for f in forge/build/libs/*.jar; do 
-              [ -e "$f" ] && process_and_upload "$f" "forge"
-            done
-          fi
-          
-          if [ -d "fabric/build/libs" ]; then
-            echo "📂 Found fabric/build/libs"
-            for f in fabric/build/libs/*.jar; do 
-              [ -e "$f" ] && process_and_upload "$f" "fabric"
-            done
-          fi
 
-          # --- 场景 B: VAir (build/libs) ---
-          # 注意：这里去掉了 local，直接使用普通变量
           if [ -d "build/libs" ]; then
             echo "📂 Found build/libs"
             for f in build/libs/*.jar; do
