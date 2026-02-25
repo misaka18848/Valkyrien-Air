@@ -61,47 +61,79 @@ jobs:
           chmod +x gradlew
           ./gradlew clean build --no-build-cache --no-daemon
 
-      - name: Install Rclone
+      - name: Install Rclone & Configure Env
         if: steps.check_update.outputs.has_update == 'true'
         run: |
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -q rclone-current-linux-amd64.zip
           mv rclone-*-linux-amd64/rclone .
           chmod +x rclone
-          ./rclone config create myr2 s3 provider Cloudflare \
-            endpoint https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com \
-            access_key_id ${{ secrets.R2_ACCESS_KEY_ID }} \
-            secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }} \
-            region auto
+          
+          # 设置环境变量，让 rclone 直接读取，无需生成 config 文件
+          export RCLONE_CONFIG_MYR2_TYPE=s3
+          export RCLONE_CONFIG_MYR2_PROVIDER=Cloudflare
+          export RCLONE_CONFIG_MYR2_ENDPOINT=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
+          export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          export RCLONE_CONFIG_MYR2_REGION=auto
+          export RCLONE_CONFIG_MYR2_ACL=private
+          
+          echo "✅ Rclone configured via environment variables."
+          # 测试连接 (可选，调试用)
+          # ./rclone lsd myr2:
 
-      - name: Process, Clean Old, and Upload
+      - name: Process and Upload (Overwrite Old)
         if: steps.check_update.outputs.has_update == 'true'
         run: |
+          # 必须重新导出变量，因为每个 run 步骤是独立的 shell
+          export RCLONE_CONFIG_MYR2_TYPE=s3
+          export RCLONE_CONFIG_MYR2_PROVIDER=Cloudflare
+          export RCLONE_CONFIG_MYR2_ENDPOINT=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          export RCLONE_CONFIG_MYR2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
+          export RCLONE_CONFIG_MYR2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          export RCLONE_CONFIG_MYR2_REGION=auto
+
           process_and_upload() {
             local src_path="$1"
+            local loader="$2" 
             local filename=$(basename "$src_path")
             
+            # 1. 过滤
             if [[ "$filename" == *"-dev-shadow"* ]] || [[ "$filename" == *"-sources"* ]]; then
+              echo "⏭️ Skip: $filename"
               return
             fi
 
-            # 识别 loader
-            local loader=""
-            if [[ "$filename" == *"-forge.jar" ]]; then loader="forge"; fi
-            if [[ "$filename" == *"-fabric.jar" ]]; then loader="fabric"; fi
-            
-            if [ -z "$loader" ]; then
-              echo "⚠️ 无法识别 Loader，跳过: $filename"
-              return
-            fi
-
+            # 2. 定义目标名
             local target_name="${MOD_PREFIX}-${loader}.jar"
-            echo "⬆️ 上传: $filename -> $target_name"
-            ./rclone copy "$src_path" "myr2:${{ secrets.R2_BUCKET_NAME }}/$target_name"
+            # 注意：这里不要加引号包裹整个 remote:path，防止 shell 解析问题
+            local remote_dest="myr2:${{ secrets.R2_BUCKET_NAME }}/${target_name}"
+
+            echo "⬆️ Uploading: $filename -> $target_name"
+            
+            # 3. 执行上传
+            # --force: 强制覆盖
+            # --transfers=1: 单线程传输更稳定
+            # --s3-chunk-size=64M: 适合小文件
+            ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Success: $target_name updated."
+            else
+              echo "❌ Failed to upload $target_name"
+              exit 1
+            fi
           }
 
           if [ -d "build/libs" ]; then
             for f in build/libs/*.jar; do
-              [ -e "$f" ] && process_and_upload "$f"
+              [ -e "$f" ] || continue
+              # 自动识别 loader
+              local loader=""
+              if [[ "$f" == *"-forge.jar" ]]; then loader="forge"; fi
+              if [[ "$f" == *"-fabric.jar" ]]; then loader="fabric"; fi
+              if [ -n "$loader" ]; then
+                process_and_upload "$f" "$loader"
+              fi
             done
           fi
