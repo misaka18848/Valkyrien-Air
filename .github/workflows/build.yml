@@ -73,15 +73,14 @@ jobs:
       - name: Process and Upload (Overwrite Old)
         if: steps.check_update.outputs.has_update == 'true'
         env:
-          # 1. 先在 Step 级别定义环境变量，避免 export 命令解析 Secrets 出错
+          # 映射 Secrets 到简单的环境变量，避免 export 解析错误
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
-          MOD_PREFIX: ${{ env.MOD_PREFIX }} # 引用 job 级别的 MOD_PREFIX
+          MOD_PREFIX: ${{ env.MOD_PREFIX }}
         run: |
-          # 2. 在 run 内部，将环境变量导出为 Rclone 专用的配置格式
-          # 注意：这里使用双引号包裹值，防止特殊字符问题
+          # 1. 配置 Rclone 环境变量
           export RCLONE_CONFIG_MYR2_TYPE=s3
           export RCLONE_CONFIG_MYR2_PROVIDER=Cloudflare
           export RCLONE_CONFIG_MYR2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -90,14 +89,9 @@ jobs:
           export RCLONE_CONFIG_MYR2_REGION=auto
           export RCLONE_CONFIG_MYR2_ACL=private
 
-          # 验证配置是否加载成功 (调试用，生产环境可保留)
-          echo "🔍 Checking Rclone config..."
-          if ! ./rclone lsd myr2: > /dev/null 2>&1; then
-             echo "⚠️ Warning: Cannot list bucket root, but will attempt upload anyway."
-          else
-             echo "✅ Rclone connection verified."
-          fi
+          echo "🔍 Rclone config loaded. Starting upload..."
 
+          # 2. 定义上传函数
           process_and_upload() {
             local src_path="$1"
             local loader="$2"
@@ -115,7 +109,8 @@ jobs:
             echo "⬆️ Uploading: $filename -> $target_name"
             
             # 执行上传 (自动覆盖旧文件)
-            if ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M; then
+            # 忽略 list 错误的警告，直接尝试 copy
+            if ./rclone copy "$src_path" "$remote_dest" --force --transfers=1 --s3-chunk-size=64M 2>&1; then
               echo "✅ Success: $target_name updated."
             else
               echo "❌ Failed to upload $target_name"
@@ -123,10 +118,31 @@ jobs:
             fi
           }
 
+          # 3. 执行上传逻辑
+          
+          # --- 场景 A: VS2 和 Clockwork (forge/build/libs, fabric/build/libs) ---
+          if [ -d "forge/build/libs" ]; then
+            echo "📂 Found forge/build/libs"
+            for f in forge/build/libs/*.jar; do 
+              [ -e "$f" ] && process_and_upload "$f" "forge"
+            done
+          fi
+          
+          if [ -d "fabric/build/libs" ]; then
+            echo "📂 Found fabric/build/libs"
+            for f in fabric/build/libs/*.jar; do 
+              [ -e "$f" ] && process_and_upload "$f" "fabric"
+            done
+          fi
+
+          # --- 场景 B: VAir (build/libs) ---
+          # 注意：这里去掉了 local，直接使用普通变量
           if [ -d "build/libs" ]; then
+            echo "📂 Found build/libs"
             for f in build/libs/*.jar; do
               [ -e "$f" ] || continue
-              local loader=""
+              
+              loader="" # 普通变量，不是 local
               if [[ "$f" == *"-forge.jar" ]]; then loader="forge"; fi
               if [[ "$f" == *"-fabric.jar" ]]; then loader="fabric"; fi
               
@@ -137,3 +153,5 @@ jobs:
               fi
             done
           fi
+
+          echo "🎉 All uploads processed."
